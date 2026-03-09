@@ -39,7 +39,6 @@ function App() {
   const [error, setError] = useState(null);
 
   const isForex = assetClass === 'forex';
-  const priceDec = result?.price_decimals ?? (isForex ? 5 : 2);
 
   // ── Auth Effects & Handlers ──
   useEffect(() => {

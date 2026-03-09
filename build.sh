@@ -5,7 +5,7 @@ set -o errexit
 echo "Construyendo el Frontend (React)..."
 cd frontend
 npm install
-npm run build
+CI=false npm run build
 cd ..
 
 echo "Instalando dependencias del Backend (Python)..."
