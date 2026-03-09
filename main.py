@@ -15,7 +15,8 @@ import requests as http_client
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 load_dotenv()
@@ -601,8 +602,8 @@ async def execute_paper_trade(
 # HEALTH CHECK
 # ─────────────────────────────────────────────────────────
 
-@app.get("/")
-async def root():
+@app.get("/api/health")
+async def health_check():
     db_status = "not configured"
     if SUPABASE_URL and SUPABASE_SERVICE_KEY:
         try:
@@ -615,3 +616,23 @@ async def root():
             db_status = f"error: {str(e)}"
 
     return {"service": "Nexus Quant API", "status": "online", "version": "2.1.0", "database": db_status}
+
+
+# ─────────────────────────────────────────────────────────
+# STATIC FILES (REACT FRONTEND)
+# ─────────────────────────────────────────────────────────
+
+frontend_build = os.path.join(os.path.dirname(__file__), "frontend", "build")
+if os.path.isdir(frontend_build):
+    app.mount("/static", StaticFiles(directory=os.path.join(frontend_build, "static")), name="static")
+
+    @app.get("/{full_path:path}")
+    async def serve_react(full_path: str):
+        path = os.path.join(frontend_build, full_path)
+        if os.path.isfile(path):
+            return FileResponse(path)
+        return FileResponse(os.path.join(frontend_build, "index.html"))
+else:
+    @app.get("/")
+    async def root():
+        return {"message": "API is running. Build the frontend (`npm run build` inside frontend/ folder) to serve the UI."}

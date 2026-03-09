@@ -3,3 +3,7 @@ uvicorn[standard]
 pandas
 numpy
 yfinance
+python-dotenv
+PyJWT
+requests
+aiofiles
