@@ -8,7 +8,17 @@ import './App.css';
    Decoupled Frontend — connects to FastAPI backend via CORS
    ═══════════════════════════════════════════════════════════ */
 
-const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+// If API URL is provided via ENV (mostly local dev), use it. 
+// Otherwise, detect if we are on the web (e.g. Render) and use the exact same domain.
+const getApiBase = () => {
+  if (process.env.REACT_APP_API_URL) return process.env.REACT_APP_API_URL;
+  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
+    return window.location.origin; // Same domain as the React app itself
+  }
+  return 'http://localhost:8000'; // Fallback for local dev
+};
+
+const API_BASE = getApiBase();
 const supabaseUrl = process.env.REACT_APP_SUPABASE_URL || 'http://placeholder.supabase.co';
 const supabaseKey = process.env.REACT_APP_SUPABASE_ANON_KEY || 'placeholder';
 const supabase = createClient(supabaseUrl, supabaseKey);
