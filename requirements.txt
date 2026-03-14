@@ -7,4 +7,3 @@ python-dotenv
 PyJWT
 requests
 aiofiles
-pandas-ta 
