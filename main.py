@@ -169,8 +169,10 @@ def compute_signals(df: pd.DataFrame, sma_fast: int, sma_slow: int) -> pd.DataFr
     df["TP_Vol"] = df["Typical_Price"] * df["Volume"]
     # Cumulative Sum to avoid loop lag
     df["Cum_TP_Vol"] = df["TP_Vol"].cumsum()
-    df["Cum_Vol"] = df["Volume"].cumsum()
+    df["Cum_Vol"] = df["Volume"].cumsum().replace(0, np.nan)
     df["VWAP"] = df["Cum_TP_Vol"] / df["Cum_Vol"]
+    # Fallback for VWAP if volume is 0: use Close
+    df["VWAP"] = df["VWAP"].fillna(df["Close"])
 
     # --- 3. Trend Intensity (ADX 14) Manual Math ---
     n = 14
@@ -191,10 +193,16 @@ def compute_signals(df: pd.DataFrame, sma_fast: int, sma_slow: int) -> pd.DataFr
     df["+DM_Smooth"] = df["+DM"].ewm(alpha=1/n, adjust=False).mean()
     df["-DM_Smooth"] = df["-DM"].ewm(alpha=1/n, adjust=False).mean()
 
-    df["+DI"] = 100 * (df["+DM_Smooth"] / df["TR_Smooth"])
-    df["-DI"] = 100 * (df["-DM_Smooth"] / df["TR_Smooth"])
+    df["+DI"] = 100 * (df["+DM_Smooth"] / df["TR_Smooth"].replace(0, np.nan))
+    df["-DI"] = 100 * (df["-DM_Smooth"] / df["TR_Smooth"].replace(0, np.nan))
     
-    df["DX"] = 100 * (abs(df["+DI"] - df["-DI"]) / (df["+DI"] + df["-DI"]))
+    # DI can be NaN if TR is 0, fill with 0 to allow DX calculation
+    df["+DI"] = df["+DI"].fillna(0)
+    df["-DI"] = df["-DI"].fillna(0)
+
+    di_sum = (df["+DI"] + df["-DI"]).replace(0, np.nan)
+    df["DX"] = 100 * (abs(df["+DI"] - df["-DI"]) / di_sum)
+    df["DX"] = df["DX"].fillna(0)
     df["ADX"] = df["DX"].ewm(alpha=1/n, adjust=False).mean()
 
     # --- 4. Signal Generation with Filters ---
@@ -239,7 +247,8 @@ def compute_signals(df: pd.DataFrame, sma_fast: int, sma_slow: int) -> pd.DataFr
         "+DI", "-DI", "DX"
     ])
 
-    return df.dropna(subset=["SMA_Fast", "SMA_Slow", "ADX", "VWAP"]).reset_index(drop=True)
+    # Only drop if SMA is missing (standard behavior), keep ADX/VWAP errors as defaults
+    return df.dropna(subset=["SMA_Fast", "SMA_Slow"]).fillna({"ADX": 0}).reset_index(drop=True)
 
 
 def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks",
