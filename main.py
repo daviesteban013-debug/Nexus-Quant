@@ -156,22 +156,90 @@ def fetch_market_data(ticker: str, interval: str) -> pd.DataFrame:
 
 
 def compute_signals(df: pd.DataFrame, sma_fast: int, sma_slow: int) -> pd.DataFrame:
-    """Vectorized SMA crossover signal generation."""
+    """Institutional-grade signal generation with ADX and VWAP filters."""
     df = df.copy()
+    
+    # --- 1. Basic SMA Crossovers ---
     df["SMA_Fast"] = df["Close"].rolling(window=sma_fast, min_periods=sma_fast).mean()
     df["SMA_Slow"] = df["Close"].rolling(window=sma_slow, min_periods=sma_slow).mean()
 
+    # --- 2. Institutional VWAP Calculation ---
+    # Typical Price = (High + Low + Close) / 3
+    df["Typical_Price"] = (df["High"] + df["Low"] + df["Close"]) / 3
+    df["TP_Vol"] = df["Typical_Price"] * df["Volume"]
+    # Cumulative Sum to avoid loop lag
+    df["Cum_TP_Vol"] = df["TP_Vol"].cumsum()
+    df["Cum_Vol"] = df["Volume"].cumsum()
+    df["VWAP"] = df["Cum_TP_Vol"] / df["Cum_Vol"]
+
+    # --- 3. Trend Intensity (ADX 14) Manual Math ---
+    n = 14
+    df["prev_close"] = df["Close"].shift(1)
+    df["tr1"] = df["High"] - df["Low"]
+    df["tr2"] = abs(df["High"] - df["prev_close"])
+    df["tr3"] = abs(df["Low"] - df["prev_close"])
+    df["TR"] = df[["tr1", "tr2", "tr3"]].max(axis=1)
+
+    df["up_move"] = df["High"] - df["High"].shift(1)
+    df["down_move"] = df["Low"].shift(1) - df["Low"]
+
+    df["+DM"] = np.where((df["up_move"] > df["down_move"]) & (df["up_move"] > 0), df["up_move"], 0)
+    df["-DM"] = np.where((df["down_move"] > df["up_move"]) & (df["down_move"] > 0), df["down_move"], 0)
+
+    # Wilde's Smoothing using EWM (alpha = 1/n)
+    df["TR_Smooth"] = df["TR"].ewm(alpha=1/n, adjust=False).mean()
+    df["+DM_Smooth"] = df["+DM"].ewm(alpha=1/n, adjust=False).mean()
+    df["-DM_Smooth"] = df["-DM"].ewm(alpha=1/n, adjust=False).mean()
+
+    df["+DI"] = 100 * (df["+DM_Smooth"] / df["TR_Smooth"])
+    df["-DI"] = 100 * (df["-DM_Smooth"] / df["TR_Smooth"])
+    
+    df["DX"] = 100 * (abs(df["+DI"] - df["-DI"]) / (df["+DI"] + df["-DI"]))
+    df["ADX"] = df["DX"].ewm(alpha=1/n, adjust=False).mean()
+
+    # --- 4. Signal Generation with Filters ---
     df["Signal"] = 0
     df.loc[df["SMA_Fast"] > df["SMA_Slow"], "Signal"] = 1    # Bullish
     df.loc[df["SMA_Fast"] < df["SMA_Slow"], "Signal"] = -1   # Bearish
 
-    # Detect crossover points (signal changes)
+    # Detect crossover points
     df["Signal_Shift"] = df["Signal"].shift(1).fillna(0)
     df["Crossover"] = 0
-    df.loc[(df["Signal"] == 1) & (df["Signal_Shift"] != 1), "Crossover"] = 1      # BUY
-    df.loc[(df["Signal"] == -1) & (df["Signal_Shift"] != -1), "Crossover"] = -1    # SHORT
 
-    return df.dropna(subset=["SMA_Fast", "SMA_Slow"]).reset_index(drop=True)
+    # Rules:
+    # 1. ADX of previous candle must be >= 25 (Trend Strength)
+    # 2. LONG: Close > VWAP
+    # 3. SHORT: Close < VWAP
+    
+    df["ADX_P"] = df["ADX"].shift(1)
+    
+    # Cross UP
+    long_condition = (
+        (df["Signal"] == 1) & 
+        (df["Signal_Shift"] != 1) & 
+        (df["ADX_P"] >= 25) & 
+        (df["Close"] > df["VWAP"])
+    )
+    df.loc[long_condition, "Crossover"] = 1
+
+    # Cross DOWN
+    short_condition = (
+        (df["Signal"] == -1) & 
+        (df["Signal_Shift"] != -1) & 
+        (df["ADX_P"] >= 25) & 
+        (df["Close"] < df["VWAP"])
+    )
+    df.loc[short_condition, "Crossover"] = -1
+
+    # Cleanup temporary math cols
+    df = df.drop(columns=[
+        "Typical_Price", "TP_Vol", "Cum_TP_Vol", "Cum_Vol", 
+        "prev_close", "tr1", "tr2", "tr3", "TR", "up_move", "down_move", 
+        "+DM", "-DM", "TR_Smooth", "+DM_Smooth", "-DM_Smooth", 
+        "+DI", "-DI", "DX"
+    ])
+
+    return df.dropna(subset=["SMA_Fast", "SMA_Slow", "ADX", "VWAP"]).reset_index(drop=True)
 
 
 def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks",
@@ -558,6 +626,8 @@ async def _run_backtest(
             "v": int(row["Volume"]),
             "sma_fast": round(float(row["SMA_Fast"]), price_dec) if pd.notna(row["SMA_Fast"]) else None,
             "sma_slow": round(float(row["SMA_Slow"]), price_dec) if pd.notna(row["SMA_Slow"]) else None,
+            "vwap": round(float(row["VWAP"]), price_dec) if pd.notna(row["VWAP"]) else None,
+            "adx": round(float(row["ADX"]), 2) if pd.notna(row["ADX"]) else None,
         })
 
     display_ticker = ticker.upper().replace("=X", "")
