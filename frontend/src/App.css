@@ -659,7 +659,6 @@ body {
   position: relative;
   flex: 1;
   min-height: 0;
-  border-bottom: 1px solid var(--border);
 }
 
 .price-pane-inner {

@@ -1,23 +1,22 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { createChart, CandlestickSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts';
+import React, { useEffect, useMemo, useRef, useState, memo } from 'react';
+import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from 'lightweight-charts';
 import '../App.css';
-import VolumePane from './VolumePane';
-import { DrawingsProvider } from './drawings/DrawingsContext';
-import DrawingToolbar from './drawings/DrawingToolbar';
 import DrawingOverlayCanvas from './drawings/DrawingOverlayCanvas';
 
-export default function PriceAnalysisPane({ data, isForex, height }) {
+function PriceAnalysisPane({ data, isForex, height, showFibs }) {
   const priceHostRef = useRef(null);
   const priceChartRef = useRef(null);
   const candleSeriesRef = useRef(null);
   const fastSeriesRef = useRef(null);
   const slowSeriesRef = useRef(null);
+  const volumeSeriesRef = useRef(null);
+  const fibLinesRef = useRef([]);
+  const fitKeyRef = useRef('');
+  const didFitRef = useRef(false);
 
-  const [priceChart, setPriceChart] = useState(null);
-  const [candleSeries, setCandleSeries] = useState(null);
-  const [volumeChart, setVolumeChart] = useState(null);
+  const [ready, setReady] = useState(false);
 
-  const { candleData, fastData, slowData, markers, fibLevels, volumeData, volumeExperimental } = useMemo(() => {
+  const { candleData, fastData, slowData, markers, fibLevels, volumeHistData } = useMemo(() => {
     if (!data?.candles || data.candles.length === 0) {
       return {
         candleData: [],
@@ -25,8 +24,7 @@ export default function PriceAnalysisPane({ data, isForex, height }) {
         slowData: [],
         markers: [],
         fibLevels: [],
-        volumeData: [],
-        volumeExperimental: Boolean(isForex || data?.volume_experimental),
+        volumeHistData: [],
       };
     }
 
@@ -42,13 +40,17 @@ export default function PriceAnalysisPane({ data, isForex, height }) {
     const sData = data.candles.filter(c => c.sma_slow != null).map(c => ({ time: new Date(c.x).getTime() / 1000, value: c.sma_slow }));
 
     const tradeMarkers = (data.trades || []).map(t => {
-      const isBuy = t.type === 'BUY' || t.type.includes('COVER');
+      const isBuy = t.type.includes('BUY') || t.type.includes('COVER');
+      const side = isBuy ? 'BUY' : 'SELL';
+      const px = Number(t.price);
+      const pxLabel = Number.isFinite(px) ? `${isForex ? '' : '$'}${px.toFixed(isForex ? 5 : 2)}` : '';
+      const pnl = typeof t.pnl === 'number' ? ` P/L ${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}` : '';
       return {
         time: new Date(t.date).getTime() / 1000,
         position: isBuy ? 'belowBar' : 'aboveBar',
-        color: isBuy ? '#10b981' : '#ef4444',
+        color: isBuy ? '#00FFA3' : '#FF3B30',
         shape: isBuy ? 'arrowUp' : 'arrowDown',
-        text: isBuy ? 'B' : 'S',
+        text: `${side} ${pxLabel}${pnl}`.trim(),
       };
     });
 
@@ -75,13 +77,9 @@ export default function PriceAnalysisPane({ data, isForex, height }) {
 
     const volData = data.candles.map(c => ({
       time: new Date(c.x).getTime() / 1000,
-      buy_volume: c.buy_volume ?? (c.c > c.o ? (c.v ?? 0) : 0),
-      sell_volume: c.sell_volume ?? (c.c <= c.o ? (c.v ?? 0) : 0),
-      total_volume: c.total_volume ?? c.v ?? 0,
+      value: c.total_volume ?? c.v ?? 0,
+      color: (c.c > c.o) ? 'rgba(0, 255, 163, 0.20)' : 'rgba(255, 59, 48, 0.20)',
     }));
-
-    const totalSum = volData.reduce((acc, v) => acc + (v.total_volume || 0), 0);
-    const experimental = Boolean(isForex || data?.volume_experimental || totalSum <= 0);
 
     return {
       candleData: cData,
@@ -89,8 +87,7 @@ export default function PriceAnalysisPane({ data, isForex, height }) {
       slowData: sData,
       markers: tradeMarkers,
       fibLevels: fibs,
-      volumeData: volData,
-      volumeExperimental: experimental,
+      volumeHistData: volData,
     };
   }, [data, isForex]);
 
@@ -154,13 +151,24 @@ export default function PriceAnalysisPane({ data, isForex, height }) {
       lastValueVisible: false,
     });
 
+    const volume = chart.addSeries(HistogramSeries, {
+      priceScaleId: 'volume',
+      priceFormat: { type: 'volume' },
+      lastValueVisible: false,
+      priceLineVisible: false,
+    });
+    chart.priceScale('volume').applyOptions({
+      scaleMargins: { top: 0.82, bottom: 0 },
+      visible: false,
+    });
+
     priceChartRef.current = chart;
     candleSeriesRef.current = candles;
     fastSeriesRef.current = fast;
     slowSeriesRef.current = slow;
+    volumeSeriesRef.current = volume;
 
-    setPriceChart(chart);
-    setCandleSeries(candles);
+    setReady(true);
 
     return () => {
       chart.remove();
@@ -168,70 +176,60 @@ export default function PriceAnalysisPane({ data, isForex, height }) {
       candleSeriesRef.current = null;
       fastSeriesRef.current = null;
       slowSeriesRef.current = null;
-      setPriceChart(null);
-      setCandleSeries(null);
+      volumeSeriesRef.current = null;
+      fibLinesRef.current = [];
+      didFitRef.current = false;
+      fitKeyRef.current = '';
+      setReady(false);
     };
   }, [isForex]);
 
   useEffect(() => {
-    if (!priceChartRef.current || !candleSeriesRef.current || !fastSeriesRef.current || !slowSeriesRef.current) return;
+    if (!priceChartRef.current || !candleSeriesRef.current || !fastSeriesRef.current || !slowSeriesRef.current || !volumeSeriesRef.current) return;
 
     candleSeriesRef.current.setData(candleData);
     fastSeriesRef.current.setData(fastData);
     slowSeriesRef.current.setData(slowData);
+    volumeSeriesRef.current.setData(volumeHistData);
 
-    if (markers.length > 0) createSeriesMarkers(candleSeriesRef.current, markers);
+    candleSeriesRef.current.setMarkers(markers);
 
-    if (candleData.length > 0) {
-      fibLevels.forEach(f => candleSeriesRef.current.createPriceLine(f));
-      priceChartRef.current.timeScale().fitContent();
+    const nextFitKey = `${data?.ticker || ''}:${data?.interval || ''}:${isForex ? 'fx' : 'eq'}`;
+    if (fitKeyRef.current !== nextFitKey) {
+      fitKeyRef.current = nextFitKey;
+      didFitRef.current = false;
     }
-  }, [candleData, fastData, slowData, markers, fibLevels]);
 
-  useEffect(() => {
-    if (!priceChart || !volumeChart) return;
-    let syncing = false;
+    if (!didFitRef.current && candleData.length > 0) {
+      priceChartRef.current.timeScale().fitContent();
+      didFitRef.current = true;
+    }
 
-    const syncFromPrice = (range) => {
-      if (syncing || !range) return;
-      syncing = true;
-      volumeChart.timeScale().setVisibleRange(range);
-      syncing = false;
-    };
+    fibLinesRef.current.forEach(line => {
+      try {
+        candleSeriesRef.current.removePriceLine(line);
+      } catch {
+        return;
+      }
+    });
+    fibLinesRef.current = [];
 
-    const syncFromVolume = (range) => {
-      if (syncing || !range) return;
-      syncing = true;
-      priceChart.timeScale().setVisibleRange(range);
-      syncing = false;
-    };
-
-    priceChart.timeScale().subscribeVisibleTimeRangeChange(syncFromPrice);
-    volumeChart.timeScale().subscribeVisibleTimeRangeChange(syncFromVolume);
-    const initial = priceChart.timeScale().getVisibleRange();
-    if (initial) volumeChart.timeScale().setVisibleRange(initial);
-
-    return () => {
-      priceChart.timeScale().unsubscribeVisibleTimeRangeChange(syncFromPrice);
-      volumeChart.timeScale().unsubscribeVisibleTimeRangeChange(syncFromVolume);
-    };
-  }, [priceChart, volumeChart]);
+    if (showFibs && candleData.length > 0) {
+      fibLinesRef.current = fibLevels.map(f => candleSeriesRef.current.createPriceLine(f));
+    }
+  }, [candleData, fastData, slowData, markers, fibLevels, volumeHistData, data?.ticker, data?.interval, isForex, showFibs]);
 
   return (
-    <DrawingsProvider>
-      <div className="price-volume-stack" style={{ height }}>
-        <div className="price-pane">
-          <div className="price-pane-inner" ref={priceHostRef} />
-          {priceChart && candleSeries ? (
-            <>
-              <DrawingToolbar />
-              <DrawingOverlayCanvas chart={priceChart} candleSeries={candleSeries} hostRef={priceHostRef} />
-            </>
-          ) : null}
-        </div>
-        <VolumePane volumeData={volumeData} isExperimental={volumeExperimental} onChartReady={setVolumeChart} />
+    <div className="price-volume-stack" style={{ height }}>
+      <div className="price-pane">
+        <div className="price-pane-inner" ref={priceHostRef} />
+        {ready && priceChartRef.current && candleSeriesRef.current ? (
+          <DrawingOverlayCanvas chart={priceChartRef.current} candleSeries={candleSeriesRef.current} hostRef={priceHostRef} />
+        ) : null}
       </div>
-    </DrawingsProvider>
+    </div>
   );
 }
+
+export default memo(PriceAnalysisPane);
 

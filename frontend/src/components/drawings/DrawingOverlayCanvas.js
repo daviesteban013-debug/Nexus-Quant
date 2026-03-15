@@ -37,6 +37,31 @@ export default function DrawingOverlayCanvas({ chart, candleSeries, hostRef }) {
   const dragRef = useRef(null);
 
   const { activeTool, drawings, activeDrawingId, setActive, addDrawing, updateDrawing, setTool } = useDrawings();
+  const drawingsRef = useRef(drawings);
+  const activeToolRef = useRef(activeTool);
+  const activeIdRef = useRef(activeDrawingId);
+  const apiRef = useRef({
+    setActive,
+    addDrawing,
+    updateDrawing,
+    setTool,
+  });
+
+  useEffect(() => {
+    drawingsRef.current = drawings;
+  }, [drawings]);
+
+  useEffect(() => {
+    activeToolRef.current = activeTool;
+  }, [activeTool]);
+
+  useEffect(() => {
+    activeIdRef.current = activeDrawingId;
+  }, [activeDrawingId]);
+
+  useEffect(() => {
+    apiRef.current = { setActive, addDrawing, updateDrawing, setTool };
+  }, [setActive, addDrawing, updateDrawing, setTool]);
 
   const style = useMemo(() => {
     return {
@@ -112,8 +137,12 @@ export default function DrawingOverlayCanvas({ chart, candleSeries, hostRef }) {
     const { w, h } = sizeRef.current;
     ctx.clearRect(0, 0, w, h);
 
-    drawings.forEach(d => {
-      const selected = d.id === activeDrawingId;
+    const list = drawingsRef.current || [];
+    const drag = dragRef.current;
+
+    list.forEach(d0 => {
+      const d = (drag && drag.id === d0.id && drag.preview) ? drag.preview : d0;
+      const selected = d.id === activeIdRef.current;
       if (d.type === 'hline') {
         const p = timePriceToXY(d.points[0]);
         if (!p) return;
@@ -162,7 +191,7 @@ export default function DrawingOverlayCanvas({ chart, candleSeries, hostRef }) {
       if (d.type === 'trendline') drawLine(ctx, a, b, true);
       if (d.type === 'rect') drawRect(ctx, a, b, true);
     }
-  }, [activeDrawingId, drawHandles, drawLine, drawRect, drawings, timePriceToXY]);
+  }, [drawHandles, drawLine, drawRect, timePriceToXY]);
 
   const scheduleDraw = useCallback(() => {
     if (rafRef.current) return;
@@ -176,8 +205,9 @@ export default function DrawingOverlayCanvas({ chart, candleSeries, hostRef }) {
     const threshold = 7;
     const w = sizeRef.current.w;
 
-    for (let i = drawings.length - 1; i >= 0; i--) {
-      const d = drawings[i];
+    const list = drawingsRef.current || [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      const d = list[i];
       if (d.type === 'hline') {
         const p = timePriceToXY(d.points[0]);
         if (!p) continue;
@@ -222,7 +252,7 @@ export default function DrawingOverlayCanvas({ chart, candleSeries, hostRef }) {
       }
     }
     return null;
-  }, [drawings, timePriceToXY]);
+  }, [timePriceToXY]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -274,36 +304,42 @@ export default function DrawingOverlayCanvas({ chart, candleSeries, hostRef }) {
       const p = getPoint(evt);
       if (!p) return;
 
-      if (activeTool) {
+      const tool = activeToolRef.current;
+      if (tool) {
         canvas.setPointerCapture(evt.pointerId);
-        if (activeTool === 'hline') {
-          addDrawing({ type: 'hline', points: [p.tp], color: style.selectedStroke });
-          setTool(null);
+        const api = apiRef.current;
+        if (tool === 'hline') {
+          api.addDrawing({ type: 'hline', points: [p.tp], color: style.selectedStroke });
+          api.setTool(null);
           draftRef.current = null;
           scheduleDraw();
           return;
         }
 
-        draftRef.current = { type: activeTool, points: [p.tp, p.tp], color: style.selectedStroke };
+        draftRef.current = { type: tool, points: [p.tp, p.tp], color: style.selectedStroke };
         scheduleDraw();
         return;
       }
 
       const hit = hitTest(p.xy);
       if (!hit) {
-        setActive(null);
+        apiRef.current.setActive(null);
         scheduleDraw();
         return;
       }
 
       canvas.setPointerCapture(evt.pointerId);
-      setActive(hit.id);
+      apiRef.current.setActive(hit.id);
+      const list = drawingsRef.current || [];
+      const base = list.find(x => x.id === hit.id);
       dragRef.current = {
         id: hit.id,
         mode: hit.mode,
         handleIndex: hit.handleIndex,
         start: p.tp,
         startXY: p.xy,
+        base,
+        preview: base ? { ...base, points: base.points.map(pt => ({ ...pt })) } : null,
       };
       scheduleDraw();
     };
@@ -323,45 +359,46 @@ export default function DrawingOverlayCanvas({ chart, candleSeries, hostRef }) {
 
       if (!dragRef.current) return;
 
-      const d = drawings.find(x => x.id === dragRef.current.id);
+      const drag = dragRef.current;
+      const d = drag.preview;
       if (!d) return;
 
-      if (dragRef.current.mode === 'move') {
-        const dt = p.tp.time - dragRef.current.start.time;
-        const dp = p.tp.price - dragRef.current.start.price;
+      if (drag.mode === 'move') {
+        const dt = p.tp.time - drag.start.time;
+        const dp = p.tp.price - drag.start.price;
         if (d.type === 'hline') {
-          updateDrawing(d.id, { points: [{ time: d.points[0].time, price: d.points[0].price + dp }] });
-          dragRef.current.start = p.tp;
+          drag.preview = { ...d, points: [{ time: d.points[0].time, price: d.points[0].price + dp }] };
+          drag.start = p.tp;
           scheduleDraw();
           return;
         }
         const nextPts = d.points.map(pt => ({ time: pt.time + dt, price: pt.price + dp }));
-        updateDrawing(d.id, { points: nextPts });
-        dragRef.current.start = p.tp;
+        drag.preview = { ...d, points: nextPts };
+        drag.start = p.tp;
         scheduleDraw();
         return;
       }
 
-      if (dragRef.current.mode === 'handle') {
+      if (drag.mode === 'handle') {
         if (d.type === 'trendline') {
           const nextPts = [...d.points];
-          nextPts[dragRef.current.handleIndex] = p.tp;
-          updateDrawing(d.id, { points: nextPts });
+          nextPts[drag.handleIndex] = p.tp;
+          drag.preview = { ...d, points: nextPts };
           scheduleDraw();
         }
         if (d.type === 'hline') {
-          updateDrawing(d.id, { points: [{ time: d.points[0].time, price: p.tp.price }] });
+          drag.preview = { ...d, points: [{ time: d.points[0].time, price: p.tp.price }] };
           scheduleDraw();
         }
         return;
       }
 
-      if (dragRef.current.mode === 'corner' && d.type === 'rect') {
+      if (drag.mode === 'corner' && d.type === 'rect') {
         const a = d.points[0];
         const b = d.points[1];
         const nextA = { ...a };
         const nextB = { ...b };
-        const idx = dragRef.current.handleIndex;
+        const idx = drag.handleIndex;
         if (idx === 0) {
           nextA.time = p.tp.time;
           nextA.price = p.tp.price;
@@ -375,7 +412,7 @@ export default function DrawingOverlayCanvas({ chart, candleSeries, hostRef }) {
           nextA.time = p.tp.time;
           nextB.price = p.tp.price;
         }
-        updateDrawing(d.id, { points: [nextA, nextB] });
+        drag.preview = { ...d, points: [nextA, nextB] };
         scheduleDraw();
       }
     };
@@ -396,10 +433,14 @@ export default function DrawingOverlayCanvas({ chart, candleSeries, hostRef }) {
         const a = d.points[0];
         const b = d.points[1];
         const same = a.time === b.time && a.price === b.price;
-        if (!same) addDrawing({ type: d.type, points: [a, b], color: style.selectedStroke });
+        if (!same) apiRef.current.addDrawing({ type: d.type, points: [a, b], color: style.selectedStroke });
         draftRef.current = null;
-        setTool(null);
+        apiRef.current.setTool(null);
         scheduleDraw();
+      }
+
+      if (dragRef.current && dragRef.current.preview) {
+        apiRef.current.updateDrawing(dragRef.current.id, { points: dragRef.current.preview.points });
       }
 
       dragRef.current = null;
@@ -410,7 +451,7 @@ export default function DrawingOverlayCanvas({ chart, candleSeries, hostRef }) {
       if (evt.key === 'Escape') {
         draftRef.current = null;
         dragRef.current = null;
-        setTool(null);
+        apiRef.current.setTool(null);
         scheduleDraw();
       }
     };
@@ -440,7 +481,7 @@ export default function DrawingOverlayCanvas({ chart, candleSeries, hostRef }) {
       canvas.removeEventListener('pointercancel', onPointerUp);
       chart.unsubscribeCrosshairMove(onCrosshair);
     };
-  }, [chart, candleSeries, drawings, activeTool, addDrawing, getLocalXY, hitTest, setActive, setTool, scheduleDraw, style.selectedStroke, updateDrawing, xyToTimePrice]);
+  }, [chart, candleSeries, getLocalXY, hitTest, scheduleDraw, style.selectedStroke, xyToTimePrice]);
 
   return (
     <canvas

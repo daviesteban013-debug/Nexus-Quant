@@ -2,6 +2,8 @@ import React, { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import ChartTerminal from './ChartTerminal';
 import LiveMarketFeed from './LiveMarketFeed';
+import { DrawingsProvider } from './drawings/DrawingsContext';
+import DrawingToolbar from './drawings/DrawingToolbar';
 
 const Card = ({ title, badge, children, className = '' }) => {
   return (
@@ -63,6 +65,7 @@ export default function Dashboard({
   handleExecute,
 }) {
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showFibs, setShowFibs] = useState(false);
 
   const a = result?.account_state;
   const decimals = result?.price_decimals || (isForex ? 5 : 2);
@@ -309,48 +312,65 @@ export default function Dashboard({
 
           <div className={`col-span-12 lg:col-span-7 ${isFullscreen ? 'lg:col-span-12' : ''}`}>
             <Card title="MARKET STRUCTURE" badge={result ? `${result.ticker} · ${result.interval}` : 'NO DATA'} className={isFullscreen ? 'fixed inset-4 z-50' : ''}>
-              <div className="flex items-center justify-between mb-4">
-                <div className="text-[11px] font-mono text-neutral-500">
-                  {result ? `${result.asset_class.toUpperCase()} · ${result.rendered_candles}/${result.total_candles}` : 'Awaiting backtest…'}
+              <DrawingsProvider>
+                <div className="flex items-center justify-between mb-4 gap-4">
+                  <div className="text-[11px] font-mono text-neutral-500 whitespace-nowrap">
+                    {result ? `${result.asset_class.toUpperCase()} · ${result.rendered_candles}/${result.total_candles}` : 'Awaiting backtest…'}
+                  </div>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => setShowFibs((v) => !v)}
+                      className={`h-9 px-3 rounded-xl border text-[11px] tracking-widest font-mono transition-all ${
+                        showFibs
+                          ? 'border-[#FFD700]/60 text-[#FFD700] bg-[#FFD700]/10 shadow-[0_0_18px_rgba(255,215,0,0.18)]'
+                          : 'border-neutral-800 text-neutral-300 bg-space-950/40 hover:text-neutral-100 hover:border-neutral-700'
+                      }`}
+                    >
+                      {showFibs ? 'HIDE FIBS' : 'SHOW FIBS'}
+                    </button>
+                    <DrawingToolbar className="hidden md:flex" />
+                    <button
+                      type="button"
+                      onClick={() => setIsFullscreen(!isFullscreen)}
+                      className="h-9 px-3 rounded-xl border border-neutral-800 bg-space-950/40 text-[11px] tracking-widest text-neutral-300 hover:text-neutral-100 hover:border-neutral-700 transition-all whitespace-nowrap"
+                    >
+                      {isFullscreen ? 'EXIT FULL' : 'FULL SCREEN'}
+                    </button>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setIsFullscreen(!isFullscreen)}
-                  className="rounded-xl border border-neutral-800 bg-space-950/40 px-3 py-2 text-[11px] tracking-widest text-neutral-300 hover:text-neutral-100 hover:border-neutral-700 transition-all"
-                >
-                  {isFullscreen ? 'EXIT FULL' : 'FULL SCREEN'}
-                </button>
-              </div>
 
-              <div className="mb-4">
-                <LiveMarketFeed
-                  ticker={ticker}
-                  assetClass={assetClass}
-                  interval={interval}
-                  decimals={isForex ? 5 : 2}
-                />
-              </div>
+                <div className="mb-4">
+                  <LiveMarketFeed
+                    ticker={ticker}
+                    assetClass={assetClass}
+                    interval={interval}
+                    decimals={isForex ? 5 : 2}
+                  />
+                </div>
 
-              <div className="rounded-2xl border border-neutral-800 bg-black/20 overflow-hidden">
-                {result ? (
-                  <div style={{ height: isFullscreen ? 'calc(100vh - 160px)' : 520 }}>
-                    <ChartTerminal
-                      data={result}
-                      isForex={isForex}
-                      isFullscreen={false}
-                      toggleFullscreen={() => {}}
-                    />
-                  </div>
-                ) : (
-                  <div className="h-[520px] grid place-items-center text-neutral-500">
-                    <div className="text-center">
-                      <div className="text-neon-yellow font-mono tracking-widest text-[11px]">NO SIGNALS</div>
-                      <div className="mt-2 text-neutral-200 font-semibold">Run a backtest to render the terminal</div>
-                      <div className="mt-1 text-sm text-neutral-500">Candles, indicators, drawings, and volume will appear here.</div>
+                <div className="rounded-2xl border border-neutral-800 bg-black/20 overflow-hidden">
+                  {result ? (
+                    <div style={{ height: isFullscreen ? 'calc(100vh - 160px)' : 520 }}>
+                      <ChartTerminal
+                        data={result}
+                        isForex={isForex}
+                        showFibs={showFibs}
+                        isFullscreen={false}
+                        toggleFullscreen={() => {}}
+                      />
                     </div>
-                  </div>
-                )}
-              </div>
+                  ) : (
+                    <div className="h-[520px] grid place-items-center text-neutral-500">
+                      <div className="text-center">
+                        <div className="text-neon-yellow font-mono tracking-widest text-[11px]">NO SIGNALS</div>
+                        <div className="mt-2 text-neutral-200 font-semibold">Run a backtest to render the terminal</div>
+                        <div className="mt-1 text-sm text-neutral-500">Candles, indicators, drawings, and volume will appear here.</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </DrawingsProvider>
             </Card>
           </div>
 

@@ -4,7 +4,7 @@ import '../App.css';
 import PriceAnalysisPane from './PriceAnalysisPane';
 import EquityPane from './EquityPane';
 
-const ChartTerminal = ({ data, isForex, isFullscreen, toggleFullscreen }) => {
+const ChartTerminal = ({ data, isForex, showFibs, isFullscreen, toggleFullscreen }) => {
     const [activeTab, setActiveTab] = useState('price');
 
     const { accountState, heatmapData } = useMemo(() => {
@@ -118,7 +118,7 @@ const ChartTerminal = ({ data, isForex, isFullscreen, toggleFullscreen }) => {
             ) : (
                 <>
                     {activeTab === 'price' ? (
-                        <PriceAnalysisPane data={data} isForex={isForex} height={isFullscreen ? 'calc(100vh - 50px)' : '400px'} />
+                        <PriceAnalysisPane data={data} isForex={isForex} showFibs={Boolean(showFibs)} height={isFullscreen ? 'calc(100vh - 50px)' : '400px'} />
                     ) : (
                         <EquityPane data={data} height={isFullscreen ? 'calc(100vh - 50px)' : '400px'} />
                     )}
