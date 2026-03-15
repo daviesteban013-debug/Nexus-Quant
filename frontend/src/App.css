@@ -1,23 +1,24 @@
 /* ═══════════════════════════════════════════════════════════
-   NEXUS QUANT WEB — Bloomberg Terminal / Dark Pool Theme
-   Palette: Deep Obsidian #09090b · Zinc #18181b · Border #27272a
-   Accents: Neon Green #10b981 · Crimson #ef4444 · Gold #FFD700
+   NEXUS QUANT WEB — Cyber‑Institutional Theme
+   Background: Deep Space Black #0B0E14
+   Panels: Elevated Dark Slate #151922
+   Accents: Neon Green #00FFA3 · Quant Yellow #FFD700 · Sell Red #FF4D4D
    ═══════════════════════════════════════════════════════════ */
 
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 :root {
-  --bg-main: #09090b;
-  --bg-card: #18181b;
-  --bg-card-alt: #1c1c20;
-  --bg-input: #0f0f12;
-  --border: #27272a;
-  --border-hover: #3f3f46;
+  --bg-main: #0B0E14;
+  --bg-card: #151922;
+  --bg-card-alt: #111522;
+  --bg-input: #0E1118;
+  --border: #1F2430;
+  --border-hover: #2A3242;
 
-  --green: #10b981;
-  --green-dim: rgba(16, 185, 129, 0.12);
-  --red: #ef4444;
-  --red-dim: rgba(239, 68, 68, 0.12);
+  --green: #00FFA3;
+  --green-dim: rgba(0, 255, 163, 0.12);
+  --red: #FF4D4D;
+  --red-dim: rgba(255, 77, 77, 0.12);
   --gold: #FFD700;
   --gold-dim: rgba(255, 215, 0, 0.10);
   --blue: #3b82f6;
@@ -25,16 +26,16 @@
   --amber: #f59e0b;
   --purple: #a78bfa;
 
-  --text-primary: #fafafa;
-  --text-secondary: #a1a1aa;
-  --text-muted: #52525b;
+  --text-primary: #E5E7EB;
+  --text-secondary: #9CA3AF;
+  --text-muted: #6B7280;
 
   --radius: 6px;
   --radius-lg: 10px;
   --transition: all 0.15s ease;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
   --font-mono: 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
-  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-ui: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
 * {
