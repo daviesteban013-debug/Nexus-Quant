@@ -6,7 +6,10 @@ FastAPI backend: Pure REST API for HFT Scalping & Paper Trading Engine
 import os
 import math
 import tempfile
+import time
+import asyncio
 from pathlib import Path
+from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -16,6 +19,7 @@ import jwt
 import requests as http_client
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException, Depends
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -110,6 +114,48 @@ INTERVAL_CONFIG = {
     "4h":  {"period": "730d", "interval": "4h"},
     "1d":  {"period": "max",  "interval": "1d"},
 }
+
+MARKET_DATA_TTL_SEC = int(os.getenv("MARKET_DATA_TTL_SEC", "30"))
+MARKET_DATA_CACHE_MAX = int(os.getenv("MARKET_DATA_CACHE_MAX", "32"))
+_market_cache: Dict[Tuple[str, str], Tuple[float, pd.DataFrame]] = {}
+_market_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
+
+def _prune_market_cache() -> None:
+    if len(_market_cache) <= MARKET_DATA_CACHE_MAX:
+        return
+    items = sorted(_market_cache.items(), key=lambda kv: kv[1][0])
+    excess = len(items) - MARKET_DATA_CACHE_MAX
+    for key, _ in items[:excess]:
+        _market_cache.pop(key, None)
+        _market_locks.pop(key, None)
+
+async def fetch_market_data_cached(ticker: str, interval: str) -> pd.DataFrame:
+    key = (ticker, interval)
+    now = time.time()
+
+    hit = _market_cache.get(key)
+    if hit:
+        ts, cached_df = hit
+        if now - ts <= MARKET_DATA_TTL_SEC:
+            return cached_df.copy(deep=False)
+
+    lock = _market_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _market_locks[key] = lock
+
+    async with lock:
+        now = time.time()
+        hit = _market_cache.get(key)
+        if hit:
+            ts, cached_df = hit
+            if now - ts <= MARKET_DATA_TTL_SEC:
+                return cached_df.copy(deep=False)
+
+        df = await run_in_threadpool(fetch_market_data, ticker, interval)
+        _market_cache[key] = (now, df)
+        _prune_market_cache()
+        return df.copy(deep=False)
 
 
 def is_jpy_pair(ticker: str) -> bool:
@@ -624,9 +670,9 @@ async def _run_backtest(
         raise ValueError("asset_class must be 'stocks' or 'forex'")
 
     formatted_ticker = format_ticker(ticker, asset_class)
-    df = fetch_market_data(formatted_ticker, interval)
-    df = compute_signals(df, sma_fast, sma_slow)
-    result = simulate_broker(df, capital, asset_class, formatted_ticker, stop_loss_pct, take_profit_pct)
+    df = await fetch_market_data_cached(formatted_ticker, interval)
+    df = await run_in_threadpool(compute_signals, df, sma_fast, sma_slow)
+    result = await run_in_threadpool(simulate_broker, df, capital, asset_class, formatted_ticker, stop_loss_pct, take_profit_pct)
 
     price_dec = get_price_decimals(asset_class, formatted_ticker)
     candle_slice = df.tail(300).copy()
@@ -635,27 +681,28 @@ async def _run_backtest(
     vol_series = candle_slice["Volume"] if "Volume" in candle_slice.columns else pd.Series([0] * len(candle_slice))
     vol_total_sum = float(pd.to_numeric(vol_series, errors="coerce").fillna(0).sum())
     volume_experimental = (asset_class == "forex") or (vol_total_sum <= 0)
-    for _, row in candle_slice.iterrows():
-        vol_raw = row["Volume"] if "Volume" in row else 0
-        vol_val = int(pd.to_numeric(vol_raw, errors="coerce")) if pd.notna(pd.to_numeric(vol_raw, errors="coerce")) else 0
-        is_buy_candle = float(row["Close"]) > float(row["Open"])
+    for row in candle_slice.itertuples(index=False):
+        vol_raw = getattr(row, "Volume", 0)
+        vol_num = pd.to_numeric(vol_raw, errors="coerce")
+        vol_val = int(vol_num) if pd.notna(vol_num) else 0
+        is_buy_candle = float(row.Close) > float(row.Open)
         buy_vol = vol_val if is_buy_candle else 0
         sell_vol = vol_val if not is_buy_candle else 0
-        ts = str(row["Date"])
+        ts = str(row.Date)
         candles.append({
             "x": ts,
-            "o": round(float(row["Open"]), price_dec),
-            "h": round(float(row["High"]), price_dec),
-            "l": round(float(row["Low"]), price_dec),
-            "c": round(float(row["Close"]), price_dec),
+            "o": round(float(row.Open), price_dec),
+            "h": round(float(row.High), price_dec),
+            "l": round(float(row.Low), price_dec),
+            "c": round(float(row.Close), price_dec),
             "v": vol_val,
             "buy_volume": buy_vol,
             "sell_volume": sell_vol,
             "total_volume": vol_val,
-            "sma_fast": round(float(row["SMA_Fast"]), price_dec) if pd.notna(row["SMA_Fast"]) else None,
-            "sma_slow": round(float(row["SMA_Slow"]), price_dec) if pd.notna(row["SMA_Slow"]) else None,
-            "vwap": round(float(row["VWAP"]), price_dec) if pd.notna(row["VWAP"]) else None,
-            "adx": round(float(row["ADX"]), 2) if pd.notna(row["ADX"]) else None,
+            "sma_fast": round(float(row.SMA_Fast), price_dec) if pd.notna(getattr(row, "SMA_Fast", None)) else None,
+            "sma_slow": round(float(row.SMA_Slow), price_dec) if pd.notna(getattr(row, "SMA_Slow", None)) else None,
+            "vwap": round(float(row.VWAP), price_dec) if pd.notna(getattr(row, "VWAP", None)) else None,
+            "adx": round(float(row.ADX), 2) if pd.notna(getattr(row, "ADX", None)) else None,
         })
         volume_profile.append({
             "timestamp": ts,
