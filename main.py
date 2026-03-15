@@ -617,18 +617,37 @@ async def _run_backtest(
     price_dec = get_price_decimals(asset_class, formatted_ticker)
     candle_slice = df.tail(300).copy()
     candles = []
+    volume_profile = []
+    vol_series = candle_slice["Volume"] if "Volume" in candle_slice.columns else pd.Series([0] * len(candle_slice))
+    vol_total_sum = float(pd.to_numeric(vol_series, errors="coerce").fillna(0).sum())
+    volume_experimental = (asset_class == "forex") or (vol_total_sum <= 0)
     for _, row in candle_slice.iterrows():
+        vol_raw = row["Volume"] if "Volume" in row else 0
+        vol_val = int(pd.to_numeric(vol_raw, errors="coerce")) if pd.notna(pd.to_numeric(vol_raw, errors="coerce")) else 0
+        is_buy_candle = float(row["Close"]) > float(row["Open"])
+        buy_vol = vol_val if is_buy_candle else 0
+        sell_vol = vol_val if not is_buy_candle else 0
+        ts = str(row["Date"])
         candles.append({
-            "x": str(row["Date"]),
+            "x": ts,
             "o": round(float(row["Open"]), price_dec),
             "h": round(float(row["High"]), price_dec),
             "l": round(float(row["Low"]), price_dec),
             "c": round(float(row["Close"]), price_dec),
-            "v": int(row["Volume"]),
+            "v": vol_val,
+            "buy_volume": buy_vol,
+            "sell_volume": sell_vol,
+            "total_volume": vol_val,
             "sma_fast": round(float(row["SMA_Fast"]), price_dec) if pd.notna(row["SMA_Fast"]) else None,
             "sma_slow": round(float(row["SMA_Slow"]), price_dec) if pd.notna(row["SMA_Slow"]) else None,
             "vwap": round(float(row["VWAP"]), price_dec) if pd.notna(row["VWAP"]) else None,
             "adx": round(float(row["ADX"]), 2) if pd.notna(row["ADX"]) else None,
+        })
+        volume_profile.append({
+            "timestamp": ts,
+            "buy_volume": buy_vol,
+            "sell_volume": sell_vol,
+            "total_volume": vol_val,
         })
 
     display_ticker = ticker.upper().replace("=X", "")
@@ -641,6 +660,8 @@ async def _run_backtest(
         "total_candles": len(df),
         "rendered_candles": len(candles),
         "candles": candles,
+        "volume_profile": volume_profile,
+        "volume_experimental": volume_experimental,
         **result,
     })
 

@@ -1,12 +1,10 @@
-import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { createChart, CandlestickSeries, LineSeries, AreaSeries, createSeriesMarkers } from 'lightweight-charts';
+import React, { useState, useMemo } from 'react';
 import ReactApexChart from 'react-apexcharts';
 import '../App.css';
+import PriceAnalysisPane from './PriceAnalysisPane';
+import EquityPane from './EquityPane';
 
 const ChartTerminal = ({ data, isForex, isFullscreen, toggleFullscreen }) => {
-    const chartContainerRef = useRef();
-    const chartRef = useRef(null);
-
     const [activeTab, setActiveTab] = useState('price');
 
     const { accountState, heatmapData } = useMemo(() => {
@@ -15,153 +13,6 @@ const ChartTerminal = ({ data, isForex, isFullscreen, toggleFullscreen }) => {
             heatmapData: data?.heatmap || []
         };
     }, [data]);
-
-    // Parse and memoize chart data
-    const { candleData, fastData, slowData, markers, fibLevels, equityData } = useMemo(() => {
-        let curve = [];
-        if (data?.equity_curve) {
-            curve = data.equity_curve.map(e => ({ time: new Date(e.date).getTime() / 1000, value: e.equity }));
-        }
-
-        if (!data?.candles || data.candles.length === 0) {
-            return { candleData: [], fastData: [], slowData: [], markers: [], fibLevels: [], equityData: curve };
-        }
-
-        // Candles and SMAs
-        const cData = data.candles.map(c => ({ time: new Date(c.x).getTime() / 1000, open: c.o, high: c.h, low: c.l, close: c.c }));
-        const fData = data.candles.filter(c => c.sma_fast != null).map(c => ({ time: new Date(c.x).getTime() / 1000, value: c.sma_fast }));
-        const sData = data.candles.filter(c => c.sma_slow != null).map(c => ({ time: new Date(c.x).getTime() / 1000, value: c.sma_slow }));
-
-        // Trade Markers
-        const tradeMarkers = (data.trades || []).map(t => {
-            const isBuy = t.type === 'BUY' || t.type.includes('COVER');
-            return {
-                time: new Date(t.date).getTime() / 1000,
-                position: isBuy ? 'belowBar' : 'aboveBar',
-                color: isBuy ? '#10b981' : '#ef4444',
-                shape: isBuy ? 'arrowUp' : 'arrowDown',
-                text: isBuy ? 'B' : 'S',
-            };
-        });
-
-        // Dynamic Fibonacci Retracement Levels
-        let maxHigh = -Infinity;
-        let minLow = Infinity;
-        cData.forEach(c => {
-            if (c.high > maxHigh) maxHigh = c.high;
-            if (c.low < minLow) minLow = c.low;
-        });
-
-        let fibs = [];
-        if (maxHigh > -Infinity && minLow < Infinity && maxHigh > minLow) {
-            const diff = maxHigh - minLow;
-            const ratios = [0, 0.236, 0.382, 0.5, 0.618, 1];
-            fibs = ratios.map(r => ({
-                price: maxHigh - (diff * r),
-                title: `Fib ${r.toFixed(3)}`,
-                color: 'rgba(255, 215, 0, 0.3)',
-                lineWidth: 1,
-                lineStyle: 2, // Dashed
-                axisLabelVisible: true,
-            }));
-        }
-
-        return { candleData: cData, fastData: fData, slowData: sData, markers: tradeMarkers, fibLevels: fibs, equityData: curve };
-    }, [data]);
-
-    useEffect(() => {
-        if (!chartContainerRef.current) return;
-
-        // Initialize chart
-        const chart = createChart(chartContainerRef.current, {
-            layout: {
-                background: { type: 'solid', color: '#131722' },
-                textColor: '#a1a1aa',
-                fontFamily: 'JetBrains Mono, monospace',
-            },
-            grid: {
-                vertLines: { color: '#2A2E39', style: 1 },
-                horzLines: { color: '#2A2E39', style: 1 },
-            },
-            crosshair: {
-                mode: 1,
-                vertLine: { color: '#FFD700', style: 3, labelBackgroundColor: '#18181b' },
-                horzLine: { color: '#FFD700', style: 3, labelBackgroundColor: '#18181b' },
-            },
-            timeScale: {
-                timeVisible: true,
-                secondsVisible: false,
-                borderVisible: false,
-            },
-            rightPriceScale: {
-                borderVisible: false,
-                alignLabels: true,
-            },
-            autoSize: true, // Handle resize automatically
-        });
-        chartRef.current = chart;
-
-        if (activeTab === 'price') {
-            // Main Candlestick Series
-            const candleSeries = chart.addSeries(CandlestickSeries, {
-                upColor: '#26a69a',
-                downColor: '#ef5350',
-                borderVisible: false,
-                wickUpColor: '#26a69a',
-                wickDownColor: '#ef5350',
-                priceFormat: {
-                    type: 'price',
-                    precision: isForex ? 5 : 2,
-                    minMove: isForex ? 0.00001 : 0.01,
-                },
-            });
-
-            if (candleData.length > 0) {
-                candleSeries.setData(candleData);
-                if (markers.length > 0) {
-                    createSeriesMarkers(candleSeries, markers);
-                }
-                fibLevels.forEach(fib => candleSeries.createPriceLine(fib));
-            }
-
-            // Fast SMA Series
-            const fastSeries = chart.addSeries(LineSeries, {
-                color: '#10b981',
-                lineWidth: 1,
-                crosshairMarkerVisible: false,
-                priceLineVisible: false,
-                lastValueVisible: false,
-            });
-            if (fastData.length > 0) fastSeries.setData(fastData);
-
-            // Slow SMA Series
-            const slowSeries = chart.addSeries(LineSeries, {
-                color: '#FFD700',
-                lineWidth: 2,
-                crosshairMarkerVisible: false,
-                priceLineVisible: false,
-                lastValueVisible: false,
-            });
-            if (slowData.length > 0) slowSeries.setData(slowData);
-
-            if (candleData.length > 0) chart.timeScale().fitContent();
-        } else if (activeTab === 'equity') {
-            const areaSeries = chart.addSeries(AreaSeries, {
-                lineColor: '#2962FF',
-                topColor: 'rgba(41, 98, 255, 0.4)',
-                bottomColor: 'rgba(41, 98, 255, 0.0)',
-                lineWidth: 2,
-                crosshairMarkerVisible: true,
-            });
-
-            if (equityData.length > 0) {
-                areaSeries.setData(equityData);
-                chart.timeScale().fitContent();
-            }
-        }
-
-        return () => chart.remove();
-    }, [activeTab, candleData, fastData, slowData, markers, fibLevels, equityData, isForex]);
 
     // Risk Analytics Chart Configurations
     const heatmapOptions = {
@@ -265,7 +116,13 @@ const ChartTerminal = ({ data, isForex, isFullscreen, toggleFullscreen }) => {
                     </div>
                 </div>
             ) : (
-                <div className="chart-container-inner" ref={chartContainerRef} style={{ width: '100%', height: isFullscreen ? 'calc(100vh - 50px)' : '400px' }} />
+                <>
+                    {activeTab === 'price' ? (
+                        <PriceAnalysisPane data={data} isForex={isForex} height={isFullscreen ? 'calc(100vh - 50px)' : '400px'} />
+                    ) : (
+                        <EquityPane data={data} height={isFullscreen ? 'calc(100vh - 50px)' : '400px'} />
+                    )}
+                </>
             )}
         </div>
     );

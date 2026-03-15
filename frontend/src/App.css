@@ -645,6 +645,118 @@ body {
   min-height: 0;
 }
 
+/* ═══ PRICE + VOLUME STACK ═══ */
+
+.price-volume-stack {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+}
+
+.price-pane {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.price-pane-inner {
+  position: absolute;
+  inset: 0;
+}
+
+.drawing-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 3;
+}
+
+.drawtool-palette {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 4;
+  background: rgba(24, 24, 27, 0.88);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(6px);
+}
+
+.drawtool-row {
+  display: flex;
+  gap: 6px;
+}
+
+.drawtool-row + .drawtool-row {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(39, 39, 42, 0.7);
+}
+
+.drawtool-btn {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 15, 18, 0.85);
+  border: 1px solid rgba(39, 39, 42, 0.9);
+  border-radius: 6px;
+  color: var(--gold);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.drawtool-btn:hover {
+  border-color: rgba(255, 215, 0, 0.55);
+  background: rgba(255, 215, 0, 0.08);
+}
+
+.drawtool-btn.active {
+  border-color: rgba(255, 215, 0, 0.9);
+  background: rgba(255, 215, 0, 0.12);
+}
+
+.volume-pane {
+  position: relative;
+  width: 100%;
+  border-top: 1px solid rgba(39, 39, 42, 0.8);
+  background: #0f111a;
+}
+
+.volume-pane-inner {
+  position: absolute;
+  inset: 0;
+}
+
+.volume-pane-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: rgba(255, 215, 0, 0.9);
+  background: rgba(255, 215, 0, 0.08);
+  border: 1px solid rgba(255, 215, 0, 0.25);
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.volume-pane-badge.experimental {
+  color: rgba(255, 215, 0, 0.95);
+  background: rgba(255, 215, 0, 0.06);
+  border-color: rgba(255, 215, 0, 0.22);
+}
+
 /* ═══ TABS ═══ */
 
 .chart-tabs {
