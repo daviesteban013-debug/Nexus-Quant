@@ -89,9 +89,12 @@ FOREX_COMMISSION = 0.50      # $0.50 per order (typical ECN)
 FOREX_LOT_UNITS = 1000       # Micro-lot (1,000 units of base currency)
 
 INTERVAL_CONFIG = {
-    "1m":  {"period": "7d",  "interval": "1m"},
-    "5m":  {"period": "30d", "interval": "5m"},
-    "15m": {"period": "60d", "interval": "15m"},
+    "1m":  {"period": "7d",   "interval": "1m"},
+    "5m":  {"period": "60d",  "interval": "5m"},
+    "15m": {"period": "60d",  "interval": "15m"},
+    "1h":  {"period": "730d", "interval": "1h"},
+    "4h":  {"period": "730d", "interval": "4h"},
+    "1d":  {"period": "max",  "interval": "1d"},
 }
 
 
@@ -116,7 +119,9 @@ def get_price_decimals(asset_class: str, ticker: str) -> int:
 def format_ticker(ticker: str, asset_class: str) -> str:
     """Format ticker for yfinance. Forex pairs need '=X' suffix."""
     ticker = ticker.upper().replace(" ", "").replace("/", "")
-    if asset_class == "forex" and not ticker.endswith("=X"):
+    # Detect Forex by asset class OR 6-letter string without symbols
+    is_fx = (asset_class == "forex") or (len(ticker) == 6 and ticker.isalpha())
+    if is_fx and not ticker.endswith("=X"):
         ticker = ticker + "=X"
     return ticker
 
@@ -156,23 +161,30 @@ def fetch_market_data(ticker: str, interval: str) -> pd.DataFrame:
 
 
 def compute_signals(df: pd.DataFrame, sma_fast: int, sma_slow: int) -> pd.DataFrame:
-    """Institutional-grade signal generation with ADX and VWAP filters."""
+    """Institutional-grade signal generation with ADX, VWAP/EMA filters."""
     df = df.copy()
     
     # --- 1. Basic SMA Crossovers ---
     df["SMA_Fast"] = df["Close"].rolling(window=sma_fast, min_periods=sma_fast).mean()
     df["SMA_Slow"] = df["Close"].rolling(window=sma_slow, min_periods=sma_slow).mean()
 
-    # --- 2. Institutional VWAP Calculation ---
-    # Typical Price = (High + Low + Close) / 3
+    # --- 2. Institutional Baseline (VWAP or EMA 200) ---
+    # EMA 200 as fallback
+    df["EMA_200"] = df["Close"].ewm(span=200, adjust=False).mean()
+    
+    # VWAP math
     df["Typical_Price"] = (df["High"] + df["Low"] + df["Close"]) / 3
     df["TP_Vol"] = df["Typical_Price"] * df["Volume"]
-    # Cumulative Sum to avoid loop lag
     df["Cum_TP_Vol"] = df["TP_Vol"].cumsum()
     df["Cum_Vol"] = df["Volume"].cumsum().replace(0, np.nan)
     df["VWAP"] = df["Cum_TP_Vol"] / df["Cum_Vol"]
-    # Fallback for VWAP if volume is 0: use Close
-    df["VWAP"] = df["VWAP"].fillna(df["Close"])
+    
+    # Pick baseline: If total volume is 0 (Forex), use EMA 200. Else use VWAP.
+    total_vol = df["Volume"].sum()
+    if total_vol == 0:
+        df["Baseline"] = df["EMA_200"]
+    else:
+        df["Baseline"] = df["VWAP"].fillna(df["EMA_200"])
 
     # --- 3. Trend Intensity (ADX 14) Manual Math ---
     n = 14
@@ -188,7 +200,6 @@ def compute_signals(df: pd.DataFrame, sma_fast: int, sma_slow: int) -> pd.DataFr
     df["+DM"] = np.where((df["up_move"] > df["down_move"]) & (df["up_move"] > 0), df["up_move"], 0)
     df["-DM"] = np.where((df["down_move"] > df["up_move"]) & (df["down_move"] > 0), df["down_move"], 0)
 
-    # Wilde's Smoothing using EWM (alpha = 1/n)
     df["TR_Smooth"] = df["TR"].ewm(alpha=1/n, adjust=False).mean()
     df["+DM_Smooth"] = df["+DM"].ewm(alpha=1/n, adjust=False).mean()
     df["-DM_Smooth"] = df["-DM"].ewm(alpha=1/n, adjust=False).mean()
@@ -196,7 +207,6 @@ def compute_signals(df: pd.DataFrame, sma_fast: int, sma_slow: int) -> pd.DataFr
     df["+DI"] = 100 * (df["+DM_Smooth"] / df["TR_Smooth"].replace(0, np.nan))
     df["-DI"] = 100 * (df["-DM_Smooth"] / df["TR_Smooth"].replace(0, np.nan))
     
-    # DI can be NaN if TR is 0, fill with 0 to allow DX calculation
     df["+DI"] = df["+DI"].fillna(0)
     df["-DI"] = df["-DI"].fillna(0)
 
@@ -210,45 +220,27 @@ def compute_signals(df: pd.DataFrame, sma_fast: int, sma_slow: int) -> pd.DataFr
     df.loc[df["SMA_Fast"] > df["SMA_Slow"], "Signal"] = 1    # Bullish
     df.loc[df["SMA_Fast"] < df["SMA_Slow"], "Signal"] = -1   # Bearish
 
-    # Detect crossover points
     df["Signal_Shift"] = df["Signal"].shift(1).fillna(0)
     df["Crossover"] = 0
-
-    # Rules:
-    # 1. ADX of previous candle must be >= 25 (Trend Strength)
-    # 2. LONG: Close > VWAP
-    # 3. SHORT: Close < VWAP
-    
     df["ADX_P"] = df["ADX"].shift(1)
     
-    # Cross UP
-    long_condition = (
-        (df["Signal"] == 1) & 
-        (df["Signal_Shift"] != 1) & 
-        (df["ADX_P"] >= 25) & 
-        (df["Close"] > df["VWAP"])
-    )
-    df.loc[long_condition, "Crossover"] = 1
+    # Rules: (ADX Guard + Baseline Alignment)
+    long_cond = (df["Signal"] == 1) & (df["Signal_Shift"] != 1) & (df["ADX_P"] >= 25) & (df["Close"] > df["Baseline"])
+    short_cond = (df["Signal"] == -1) & (df["Signal_Shift"] != -1) & (df["ADX_P"] >= 25) & (df["Close"] < df["Baseline"])
 
-    # Cross DOWN
-    short_condition = (
-        (df["Signal"] == -1) & 
-        (df["Signal_Shift"] != -1) & 
-        (df["ADX_P"] >= 25) & 
-        (df["Close"] < df["VWAP"])
-    )
-    df.loc[short_condition, "Crossover"] = -1
+    df.loc[long_cond, "Crossover"] = 1
+    df.loc[short_cond, "Crossover"] = -1
 
-    # Cleanup temporary math cols
-    df = df.drop(columns=[
-        "Typical_Price", "TP_Vol", "Cum_TP_Vol", "Cum_Vol", 
+    # Cleanup
+    cols_to_drop = [
+        "Typical_Price", "TP_Vol", "Cum_TP_Vol", "Cum_Vol", "EMA_200",
         "prev_close", "tr1", "tr2", "tr3", "TR", "up_move", "down_move", 
         "+DM", "-DM", "TR_Smooth", "+DM_Smooth", "-DM_Smooth", 
         "+DI", "-DI", "DX"
-    ])
+    ]
+    df = df.drop(columns=cols_to_drop)
 
-    # Only drop if SMA is missing (standard behavior), keep ADX/VWAP errors as defaults
-    return df.dropna(subset=["SMA_Fast", "SMA_Slow"]).fillna({"ADX": 0}).reset_index(drop=True)
+    return df.dropna(subset=["SMA_Fast", "SMA_Slow"]).fillna({"ADX": 0, "VWAP": df["Close"]}).reset_index(drop=True)
 
 
 def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks",
