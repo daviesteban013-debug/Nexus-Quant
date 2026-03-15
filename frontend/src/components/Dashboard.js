@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import ChartTerminal from './ChartTerminal';
+import LiveMarketFeed from './LiveMarketFeed';
 
 const Card = ({ title, badge, children, className = '' }) => {
   return (
@@ -278,6 +279,15 @@ export default function Dashboard({
                 >
                   {isFullscreen ? 'EXIT FULL' : 'FULL SCREEN'}
                 </button>
+              </div>
+
+              <div className="mb-4">
+                <LiveMarketFeed
+                  ticker={ticker}
+                  assetClass={assetClass}
+                  interval={interval}
+                  decimals={isForex ? 5 : 2}
+                />
               </div>
 
               <div className="rounded-2xl border border-neutral-800 bg-black/20 overflow-hidden">
