@@ -837,14 +837,19 @@ async def _run_backtest(
     vol_series = candle_slice["Volume"] if "Volume" in candle_slice.columns else pd.Series([0] * len(candle_slice))
     vol_total_sum = float(pd.to_numeric(vol_series, errors="coerce").fillna(0).sum())
     volume_experimental = (asset_class == "forex") or (vol_total_sum <= 0)
-    for row in candle_slice.itertuples(index=False):
+    vol_ma20_series = pd.to_numeric(vol_series, errors="coerce").fillna(0).rolling(window=20, min_periods=1).mean()
+    for i, row in enumerate(candle_slice.itertuples(index=False)):
         vol_raw = getattr(row, "Volume", 0)
         vol_num = pd.to_numeric(vol_raw, errors="coerce")
         vol_val = int(vol_num) if pd.notna(vol_num) else 0
         is_buy_candle = float(row.Close) > float(row.Open)
         buy_vol = vol_val if is_buy_candle else 0
         sell_vol = vol_val if not is_buy_candle else 0
+        volume_delta = int(buy_vol - sell_vol)
         ts = str(row.Date)
+        ma20 = float(pd.to_numeric(vol_ma20_series.iloc[i], errors="coerce")) if i < len(vol_ma20_series) else 0.0
+        denom = ma20 if ma20 > 0 else float(max(vol_val, 1))
+        volume_intensity = float(max(0.0, min(1.0, float(vol_val) / float(denom))))
         candles.append({
             "x": ts,
             "o": round(float(row.Open), price_dec),
@@ -855,6 +860,8 @@ async def _run_backtest(
             "buy_volume": buy_vol,
             "sell_volume": sell_vol,
             "total_volume": vol_val,
+            "volume_delta": volume_delta,
+            "volume_intensity": volume_intensity,
             "sma_fast": round(float(row.SMA_Fast), price_dec) if pd.notna(getattr(row, "SMA_Fast", None)) else None,
             "sma_slow": round(float(row.SMA_Slow), price_dec) if pd.notna(getattr(row, "SMA_Slow", None)) else None,
             "vwap": round(float(row.VWAP), price_dec) if pd.notna(getattr(row, "VWAP", None)) else None,

@@ -1,10 +1,10 @@
 import React, { useState, useMemo } from 'react';
 import ReactApexChart from 'react-apexcharts';
 import '../App.css';
-import PriceAnalysisPane from './PriceAnalysisPane';
+import AdvancedProChart from './AdvancedProChart';
 import EquityPane from './EquityPane';
 
-const ChartTerminal = ({ data, isForex, showFibs, isFullscreen, toggleFullscreen }) => {
+const ChartTerminal = ({ data, isForex, isFullscreen, toggleFullscreen }) => {
     const [activeTab, setActiveTab] = useState('price');
 
     const { accountState, heatmapData } = useMemo(() => {
@@ -72,9 +72,6 @@ const ChartTerminal = ({ data, isForex, showFibs, isFullscreen, toggleFullscreen
                     <button className={`chart-tab ${activeTab === 'equity' ? 'active' : ''}`} onClick={() => setActiveTab('equity')}>Equity Curve</button>
                     <button className={`chart-tab ${activeTab === 'risk' ? 'active' : ''}`} onClick={() => setActiveTab('risk')}>Risk Analytics</button>
                 </div>
-                <button className="btn-fullscreen" onClick={toggleFullscreen}>
-                    {isFullscreen ? '⤓ Exit Full Screen' : '⤢ Full Screen'}
-                </button>
             </div>
 
             {activeTab === 'risk' ? (
@@ -118,7 +115,7 @@ const ChartTerminal = ({ data, isForex, showFibs, isFullscreen, toggleFullscreen
             ) : (
                 <>
                     {activeTab === 'price' ? (
-                        <PriceAnalysisPane data={data} isForex={isForex} showFibs={Boolean(showFibs)} height={isFullscreen ? 'calc(100vh - 50px)' : '400px'} />
+                        <AdvancedProChart data={data} isForex={isForex} isFullscreen={isFullscreen} onToggleFullscreen={toggleFullscreen} />
                     ) : (
                         <EquityPane data={data} height={isFullscreen ? 'calc(100vh - 50px)' : '400px'} />
                     )}
