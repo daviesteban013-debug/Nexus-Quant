@@ -9,7 +9,7 @@ import tempfile
 import time
 import asyncio
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Set, Optional, Any
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -18,12 +18,15 @@ from datetime import datetime
 import jwt
 import requests as http_client
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query, HTTPException, Depends
+from fastapi import FastAPI, Query, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi_cache import FastAPICache
+from fastapi_cache.backends.inmemory import InMemoryBackend
+from fastapi_cache.decorator import cache
 
 load_dotenv()
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
@@ -91,6 +94,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def _init_cache():
+    FastAPICache.init(InMemoryBackend(), prefix="nexus-quant")
+
 # ─────────────────────────────────────────────────────────
 # CONSTANTS — Broker Fee Schedule
 # ─────────────────────────────────────────────────────────
@@ -115,47 +122,81 @@ INTERVAL_CONFIG = {
     "1d":  {"period": "max",  "interval": "1d"},
 }
 
-MARKET_DATA_TTL_SEC = int(os.getenv("MARKET_DATA_TTL_SEC", "30"))
-MARKET_DATA_CACHE_MAX = int(os.getenv("MARKET_DATA_CACHE_MAX", "32"))
-_market_cache: Dict[Tuple[str, str], Tuple[float, pd.DataFrame]] = {}
-_market_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
+def _market_key_builder(
+    func: Any,
+    namespace: str,
+    request: Optional[Any],
+    response: Optional[Any],
+    *args: Any,
+    **kwargs: Any,
+) -> str:
+    ticker = kwargs.get("ticker") if "ticker" in kwargs else (args[0] if len(args) > 0 else "")
+    interval = kwargs.get("interval") if "interval" in kwargs else (args[1] if len(args) > 1 else "")
+    return f"{namespace}:{str(ticker)}:{str(interval)}"
 
-def _prune_market_cache() -> None:
-    if len(_market_cache) <= MARKET_DATA_CACHE_MAX:
-        return
-    items = sorted(_market_cache.items(), key=lambda kv: kv[1][0])
-    excess = len(items) - MARKET_DATA_CACHE_MAX
-    for key, _ in items[:excess]:
-        _market_cache.pop(key, None)
-        _market_locks.pop(key, None)
+def _df_to_cache_payload(df: pd.DataFrame) -> Dict[str, list]:
+    payload_df = df.copy()
+    payload_df["Date"] = pd.to_datetime(payload_df["Date"]).dt.strftime("%Y-%m-%dT%H:%M:%S")
+    return payload_df[["Date", "Open", "High", "Low", "Close", "Volume"]].to_dict(orient="list")
 
-async def fetch_market_data_cached(ticker: str, interval: str) -> pd.DataFrame:
-    key = (ticker, interval)
+def _cache_payload_to_df(payload: Dict[str, list]) -> pd.DataFrame:
+    df = pd.DataFrame(payload)
+    df["Date"] = pd.to_datetime(df["Date"])
+    return df
+
+@cache(expire=300, namespace="yfinance:history", key_builder=_market_key_builder)
+async def fetch_market_data_cached(ticker: str, interval: str) -> Dict[str, list]:
+    df = await run_in_threadpool(fetch_market_data, ticker, interval)
+    return _df_to_cache_payload(df)
+
+class ConnectionManager:
+    def __init__(self) -> None:
+        self._connections: Set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        async with self._lock:
+            self._connections.add(websocket)
+
+    async def disconnect(self, websocket: WebSocket) -> None:
+        async with self._lock:
+            self._connections.discard(websocket)
+
+live_manager = ConnectionManager()
+
+_quote_cache: Dict[str, Tuple[float, float]] = {}
+_quote_lock = asyncio.Lock()
+
+def _fetch_latest_price_sync(ticker: str) -> float:
+    data = yf.download(
+        ticker,
+        period="1d",
+        interval="1m",
+        progress=False,
+        auto_adjust=True,
+    )
+    if data.empty:
+        raise ValueError(f"No data returned for {ticker} at 1m")
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    last_close = float(pd.to_numeric(data["Close"].iloc[-1], errors="coerce"))
+    if math.isnan(last_close):
+        raise ValueError(f"Invalid last price for {ticker}")
+    return last_close
+
+async def get_latest_price(ticker: str) -> float:
     now = time.time()
+    async with _quote_lock:
+        hit = _quote_cache.get(ticker)
+        if hit and (now - hit[0] <= 2.0):
+            return hit[1]
 
-    hit = _market_cache.get(key)
-    if hit:
-        ts, cached_df = hit
-        if now - ts <= MARKET_DATA_TTL_SEC:
-            return cached_df.copy(deep=False)
+    price = await run_in_threadpool(_fetch_latest_price_sync, ticker)
 
-    lock = _market_locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _market_locks[key] = lock
-
-    async with lock:
-        now = time.time()
-        hit = _market_cache.get(key)
-        if hit:
-            ts, cached_df = hit
-            if now - ts <= MARKET_DATA_TTL_SEC:
-                return cached_df.copy(deep=False)
-
-        df = await run_in_threadpool(fetch_market_data, ticker, interval)
-        _market_cache[key] = (now, df)
-        _prune_market_cache()
-        return df.copy(deep=False)
+    async with _quote_lock:
+        _quote_cache[ticker] = (now, price)
+        return price
 
 
 def is_jpy_pair(ticker: str) -> bool:
@@ -670,7 +711,8 @@ async def _run_backtest(
         raise ValueError("asset_class must be 'stocks' or 'forex'")
 
     formatted_ticker = format_ticker(ticker, asset_class)
-    df = await fetch_market_data_cached(formatted_ticker, interval)
+    history_payload = await fetch_market_data_cached(formatted_ticker, interval)
+    df = _cache_payload_to_df(history_payload)
     df = await run_in_threadpool(compute_signals, df, sma_fast, sma_slow)
     result = await run_in_threadpool(simulate_broker, df, capital, asset_class, formatted_ticker, stop_loss_pct, take_profit_pct)
 
@@ -750,6 +792,35 @@ async def execute_paper_trade(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Engine error: {str(e)}")
+
+@app.websocket("/ws/live")
+async def ws_live(websocket: WebSocket):
+    await live_manager.connect(websocket)
+    ticker = websocket.query_params.get("ticker", "AAPL")
+    interval = websocket.query_params.get("interval", "1m")
+    asset_class = websocket.query_params.get("asset_class", "stocks")
+    formatted_ticker = format_ticker(ticker, asset_class)
+    try:
+        while True:
+            price = await get_latest_price(formatted_ticker)
+            await websocket.send_json({
+                "type": "live_tick",
+                "ticker": ticker,
+                "asset_class": asset_class,
+                "interval": interval,
+                "server_time": datetime.utcnow().isoformat() + "Z",
+                "heartbeat": True,
+                "price": price,
+            })
+            await asyncio.sleep(3)
+    except WebSocketDisconnect:
+        await live_manager.disconnect(websocket)
+    except Exception:
+        await live_manager.disconnect(websocket)
+        try:
+            await websocket.close()
+        except Exception:
+            return
 
 # ─────────────────────────────────────────────────────────
 # HEALTH CHECK

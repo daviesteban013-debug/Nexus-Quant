@@ -3,6 +3,7 @@ uvicorn[standard]>=0.29,<1
 pandas>=2.0,<3
 numpy>=1.24,<3
 yfinance>=1.2,<2
+fastapi-cache2>=0.2.1,<1
 python-dotenv>=1,<2
 PyJWT>=2,<3
 requests>=2.31,<3
