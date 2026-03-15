@@ -66,6 +66,7 @@ export default function Dashboard({
 
   const a = result?.account_state;
   const decimals = result?.price_decimals || (isForex ? 5 : 2);
+  const ai = result?.ai_prediction;
 
   const metrics = useMemo(() => {
     const net = a?.net_equity;
@@ -82,6 +83,27 @@ export default function Dashboard({
       from: a?.starting_capital != null ? `from $${Number(a.starting_capital).toLocaleString()}` : 'Awaiting backtest',
     };
   }, [a]);
+
+  const aiUi = useMemo(() => {
+    const confidence = typeof ai?.confidence_score === 'number' ? ai.confidence_score : null;
+    const direction = ai?.direction || 'NEUTRAL';
+    const threshold = 0.75;
+    const pct = confidence != null ? Math.round(confidence * 100) : null;
+
+    if (confidence == null) {
+      return { label: 'AI OFFLINE', pct: null, tone: 'yellow', glow: 'shadow-none' };
+    }
+
+    if (direction === 'BULLISH' && confidence > threshold) {
+      return { label: 'BULLISH BIAS', pct, tone: 'green', glow: 'shadow-[0_0_24px_rgba(0,255,163,0.35)]' };
+    }
+
+    if (direction === 'BEARISH' && confidence > threshold) {
+      return { label: 'BEARISH BIAS', pct, tone: 'red', glow: 'shadow-[0_0_24px_rgba(255,77,77,0.35)]' };
+    }
+
+    return { label: 'MARKET NOISE - HOLDING CASH', pct, tone: 'yellow', glow: 'shadow-[0_0_18px_rgba(255,215,0,0.25)]' };
+  }, [ai]);
 
   return (
     <div className="min-h-full bg-space-950 text-neutral-100 font-ui">
@@ -146,124 +168,143 @@ export default function Dashboard({
           </div>
 
           <div className="col-span-12 lg:col-span-3">
-            <Card title="CONTROL PANEL" badge={assetClass.toUpperCase()}>
-              {error ? (
-                <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-                  {error}
+            <div className="space-y-5">
+              <Card title="AI PREDICTOR" badge={ai?.direction || 'NEUTRAL'}>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-[11px] tracking-[0.26em] text-neutral-400">CONFIDENCE</div>
+                    <div className={`mt-2 font-mono text-lg ${aiUi.tone === 'green' ? 'text-[#00FFA3]' : aiUi.tone === 'red' ? 'text-red-400' : 'text-[#FFD700]'} ${aiUi.glow}`}>
+                      {aiUi.pct != null ? `${aiUi.pct}%` : '—'}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[10px] tracking-[0.26em] text-neutral-500">STATE</div>
+                    <div className={`mt-2 text-[11px] tracking-widest ${aiUi.tone === 'green' ? 'text-[#00FFA3]' : aiUi.tone === 'red' ? 'text-red-300' : 'text-[#FFD700]'}`}>
+                      {aiUi.label}
+                    </div>
+                  </div>
                 </div>
-              ) : null}
+              </Card>
 
-              <div className="space-y-4">
-                <div>
-                  <div className="text-[11px] tracking-widest text-neutral-400">ASSET</div>
-                  <select
-                    value={assetClass}
-                    onChange={(e) => setAssetClass(e.target.value)}
-                    className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
+              <Card title="CONTROL PANEL" badge={assetClass.toUpperCase()}>
+                {error ? (
+                  <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                    {error}
+                  </div>
+                ) : null}
+
+                <div className="space-y-4">
+                  <div>
+                    <div className="text-[11px] tracking-widest text-neutral-400">ASSET</div>
+                    <select
+                      value={assetClass}
+                      onChange={(e) => setAssetClass(e.target.value)}
+                      className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
+                    >
+                      <option value="stocks">Equities</option>
+                      <option value="forex">Forex</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div className="text-[11px] tracking-widest text-neutral-400">{isForex ? 'PAIR' : 'TICKER'}</div>
+                    <input
+                      value={ticker}
+                      onChange={(e) => setTicker(e.target.value.toUpperCase())}
+                      placeholder={isForex ? 'EURUSD' : 'AAPL'}
+                      className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 placeholder:text-neutral-600 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="text-[11px] tracking-widest text-neutral-400">TIMEFRAME</div>
+                    <select
+                      value={interval}
+                      onChange={(e) => setInterval(e.target.value)}
+                      className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
+                    >
+                      <option value="1m">1m</option>
+                      <option value="5m">5m</option>
+                      <option value="15m">15m</option>
+                      <option value="1h">1h</option>
+                      <option value="4h">4h</option>
+                      <option value="1d">1d</option>
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-[11px] tracking-widest text-neutral-400">SMA FAST</div>
+                      <input
+                        type="number"
+                        min="2"
+                        value={smaFast}
+                        onChange={(e) => setSmaFast(parseInt(e.target.value, 10) || 5)}
+                        className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
+                      />
+                    </div>
+                    <div>
+                      <div className="text-[11px] tracking-widest text-neutral-400">SMA SLOW</div>
+                      <input
+                        type="number"
+                        min="5"
+                        value={smaSlow}
+                        onChange={(e) => setSmaSlow(parseInt(e.target.value, 10) || 20)}
+                        className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-[11px] tracking-widest text-neutral-400">STOP‑LOSS %</div>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={stopLoss}
+                        onChange={(e) => setStopLoss(parseFloat(e.target.value) || 0)}
+                        className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
+                      />
+                    </div>
+                    <div>
+                      <div className="text-[11px] tracking-widest text-neutral-400">TAKE‑PROFIT %</div>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={takeProfit}
+                        onChange={(e) => setTakeProfit(parseFloat(e.target.value) || 0)}
+                        className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-[11px] tracking-widest text-neutral-400">CAPITAL</div>
+                    <input
+                      type="number"
+                      min="100"
+                      step="100"
+                      value={capital}
+                      onChange={(e) => setCapital(parseFloat(e.target.value) || 1000)}
+                      className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
+                    />
+                  </div>
+
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.99 }}
+                    type="button"
+                    onClick={handleExecute}
+                    disabled={loading}
+                    className="w-full rounded-xl bg-neon-green text-space-950 font-semibold py-3 transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed shadow-[0_0_0_1px_rgba(0,255,163,0.25),0_18px_50px_rgba(0,0,0,0.55)] hover:shadow-[0_0_0_1px_rgba(0,255,163,0.35),0_22px_70px_rgba(0,0,0,0.65)]"
                   >
-                    <option value="stocks">Equities</option>
-                    <option value="forex">Forex</option>
-                  </select>
+                    {loading ? 'Running…' : 'EXECUTE BACKTEST'}
+                  </motion.button>
                 </div>
-
-                <div>
-                  <div className="text-[11px] tracking-widest text-neutral-400">{isForex ? 'PAIR' : 'TICKER'}</div>
-                  <input
-                    value={ticker}
-                    onChange={(e) => setTicker(e.target.value.toUpperCase())}
-                    placeholder={isForex ? 'EURUSD' : 'AAPL'}
-                    className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 placeholder:text-neutral-600 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
-                  />
-                </div>
-
-                <div>
-                  <div className="text-[11px] tracking-widest text-neutral-400">TIMEFRAME</div>
-                  <select
-                    value={interval}
-                    onChange={(e) => setInterval(e.target.value)}
-                    className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
-                  >
-                    <option value="1m">1m</option>
-                    <option value="5m">5m</option>
-                    <option value="15m">15m</option>
-                    <option value="1h">1h</option>
-                    <option value="4h">4h</option>
-                    <option value="1d">1d</option>
-                  </select>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <div className="text-[11px] tracking-widest text-neutral-400">SMA FAST</div>
-                    <input
-                      type="number"
-                      min="2"
-                      value={smaFast}
-                      onChange={(e) => setSmaFast(parseInt(e.target.value, 10) || 5)}
-                      className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
-                    />
-                  </div>
-                  <div>
-                    <div className="text-[11px] tracking-widest text-neutral-400">SMA SLOW</div>
-                    <input
-                      type="number"
-                      min="5"
-                      value={smaSlow}
-                      onChange={(e) => setSmaSlow(parseInt(e.target.value, 10) || 20)}
-                      className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <div className="text-[11px] tracking-widest text-neutral-400">STOP‑LOSS %</div>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.5"
-                      value={stopLoss}
-                      onChange={(e) => setStopLoss(parseFloat(e.target.value) || 0)}
-                      className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
-                    />
-                  </div>
-                  <div>
-                    <div className="text-[11px] tracking-widest text-neutral-400">TAKE‑PROFIT %</div>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.5"
-                      value={takeProfit}
-                      onChange={(e) => setTakeProfit(parseFloat(e.target.value) || 0)}
-                      className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <div className="text-[11px] tracking-widest text-neutral-400">CAPITAL</div>
-                  <input
-                    type="number"
-                    min="100"
-                    step="100"
-                    value={capital}
-                    onChange={(e) => setCapital(parseFloat(e.target.value) || 1000)}
-                    className="mt-2 w-full rounded-xl bg-space-950/60 border border-neutral-800 px-3 py-3 text-sm font-mono text-neutral-100 outline-none transition-all focus:border-neon-green/60 focus:ring-2 focus:ring-neon-green/30"
-                  />
-                </div>
-
-                <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.99 }}
-                  type="button"
-                  onClick={handleExecute}
-                  disabled={loading}
-                  className="w-full rounded-xl bg-neon-green text-space-950 font-semibold py-3 transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed shadow-[0_0_0_1px_rgba(0,255,163,0.25),0_18px_50px_rgba(0,0,0,0.55)] hover:shadow-[0_0_0_1px_rgba(0,255,163,0.35),0_22px_70px_rgba(0,0,0,0.65)]"
-                >
-                  {loading ? 'Running…' : 'EXECUTE BACKTEST'}
-                </motion.button>
-              </div>
-            </Card>
+              </Card>
+            </div>
           </div>
 
           <div className={`col-span-12 lg:col-span-7 ${isFullscreen ? 'lg:col-span-12' : ''}`}>

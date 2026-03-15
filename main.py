@@ -18,6 +18,8 @@ from datetime import datetime
 import jwt
 import requests as http_client
 from dotenv import load_dotenv
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 from fastapi import FastAPI, Query, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -343,6 +345,117 @@ def compute_signals(df: pd.DataFrame, sma_fast: int, sma_slow: int) -> pd.DataFr
 
     return df.dropna(subset=["SMA_Fast", "SMA_Slow"]).fillna({"ADX": 0, "VWAP": df["Close"]}).reset_index(drop=True)
 
+def _compute_rsi(close: pd.Series, length: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(alpha=1/length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/length, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def _compute_atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/length, adjust=False).mean()
+    return atr
+
+def _compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
+    prev_high = high.shift(1)
+    prev_low = low.shift(1)
+    prev_close = close.shift(1)
+
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    up_move = high - prev_high
+    down_move = prev_low - low
+
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    tr_smooth = pd.Series(tr).ewm(alpha=1/length, adjust=False).mean()
+    plus_dm_smooth = pd.Series(plus_dm, index=high.index).ewm(alpha=1/length, adjust=False).mean()
+    minus_dm_smooth = pd.Series(minus_dm, index=high.index).ewm(alpha=1/length, adjust=False).mean()
+
+    plus_di = 100 * (plus_dm_smooth / tr_smooth.replace(0, np.nan))
+    minus_di = 100 * (minus_dm_smooth / tr_smooth.replace(0, np.nan))
+
+    di_sum = (plus_di + minus_di).replace(0, np.nan)
+    dx = 100 * ((plus_di - minus_di).abs() / di_sum)
+    adx = dx.ewm(alpha=1/length, adjust=False).mean()
+    return adx
+
+def compute_ai_prediction_and_signals(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    df_feat = df.copy()
+
+    sma_10 = df_feat["Close"].rolling(window=10, min_periods=10).mean()
+    sma_30 = df_feat["Close"].rolling(window=30, min_periods=30).mean()
+    df_feat["SMA_DIST_10_30"] = (sma_10 - sma_30) / df_feat["Close"].replace(0, np.nan)
+
+    df_feat["RSI_14"] = _compute_rsi(df_feat["Close"], length=14)
+    df_feat["ADX_14"] = _compute_adx(df_feat["High"], df_feat["Low"], df_feat["Close"], length=14)
+    df_feat["ATR_14"] = _compute_atr(df_feat["High"], df_feat["Low"], df_feat["Close"], length=14)
+
+    feature_cols = ["SMA_DIST_10_30", "RSI_14", "ADX_14", "ATR_14"]
+
+    df_trainable = df_feat.copy()
+    df_trainable["next_close"] = df_trainable["Close"].shift(-1)
+    df_trainable["target"] = (df_trainable["next_close"] > df_trainable["Close"]).astype(int)
+    df_trainable = df_trainable.dropna(subset=feature_cols + ["next_close"])
+
+    ai_prediction = {"direction": "NEUTRAL", "confidence_score": 0.0}
+    df_feat["AI_Signal"] = 0
+
+    if len(df_trainable) < 80:
+        return df_feat, ai_prediction
+
+    X = df_trainable[feature_cols]
+    y = df_trainable["target"]
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+
+    proba = model.predict_proba(X_test)
+    classes = list(getattr(model, "classes_", []))
+    if 1 in classes:
+        idx_up = classes.index(1)
+    else:
+        idx_up = 0
+
+    proba_up = proba[:, idx_up]
+    df_feat.loc[X_test.index, "AI_Prob_Up"] = proba_up
+
+    latest_feat = df_feat[feature_cols].dropna().tail(1)
+    if len(latest_feat) > 0:
+        latest_proba = model.predict_proba(latest_feat)[0]
+        p_up = float(latest_proba[idx_up])
+        p_down = float(1.0 - p_up)
+        confidence = float(max(p_up, p_down))
+        if p_up > 0.75:
+            ai_prediction = {"direction": "BULLISH", "confidence_score": float(p_up)}
+        elif p_down > 0.75:
+            ai_prediction = {"direction": "BEARISH", "confidence_score": float(p_down)}
+        else:
+            ai_prediction = {"direction": "NEUTRAL", "confidence_score": confidence}
+
+    df_feat["AI_Signal"] = np.where(
+        df_feat.get("AI_Prob_Up", np.nan) > 0.75,
+        1,
+        np.where(df_feat.get("AI_Prob_Up", np.nan) < 0.25, -1, 0),
+    )
+    df_feat["AI_Signal"] = df_feat["AI_Signal"].fillna(0).astype(int)
+
+    return df_feat, ai_prediction
+
 
 def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks",
                     ticker: str = "", stop_loss_pct: float = 0, take_profit_pct: float = 0) -> dict:
@@ -385,7 +498,7 @@ def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks
     for i in range(len(df)):
         row = df.iloc[i]
         price = float(row["Close"])
-        crossover = int(row["Crossover"])
+        crossover = int(row.get("AI_Signal", row.get("Crossover", 0)))
         date_str = str(row["Date"])
 
         # ── Calculate floating PNL ──
@@ -714,6 +827,7 @@ async def _run_backtest(
     history_payload = await fetch_market_data_cached(formatted_ticker, interval)
     df = _cache_payload_to_df(history_payload)
     df = await run_in_threadpool(compute_signals, df, sma_fast, sma_slow)
+    df, ai_prediction = await run_in_threadpool(compute_ai_prediction_and_signals, df)
     result = await run_in_threadpool(simulate_broker, df, capital, asset_class, formatted_ticker, stop_loss_pct, take_profit_pct)
 
     price_dec = get_price_decimals(asset_class, formatted_ticker)
@@ -765,6 +879,7 @@ async def _run_backtest(
         "candles": candles,
         "volume_profile": volume_profile,
         "volume_experimental": volume_experimental,
+        "ai_prediction": ai_prediction,
         **result,
     })
 
