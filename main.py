@@ -5,6 +5,8 @@ FastAPI backend: Pure REST API for HFT Scalping & Paper Trading Engine
 
 import os
 import math
+import tempfile
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -23,6 +25,18 @@ load_dotenv()
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+
+def _configure_yfinance_cache():
+    cache_dir = os.getenv("YFINANCE_CACHE_DIR") or os.path.join(tempfile.gettempdir(), "py-yfinance")
+    try:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        setter = getattr(yf, "set_tz_cache_location", None)
+        if callable(setter):
+            setter(cache_dir)
+    except Exception:
+        return
+
+_configure_yfinance_cache()
 
 # ─────────────────────────────────────────────────────────
 # SUPABASE REST CLIENT
