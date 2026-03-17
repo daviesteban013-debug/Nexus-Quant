@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 're-t';
 
 export default function LiveMarketFeed({ ticker = 'AAPL', assetClass = 'stocks', interval = '1m', decimals = 2 }) {
   const [liveData, setLiveData] = useState({ status: 'Disconnected', price: null });

@@ -18,8 +18,6 @@ from datetime import datetime
 import jwt
 import requests as http_client
 from dotenv import load_dotenv
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
 from fastapi import FastAPI, Query, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -181,6 +179,20 @@ _quote_cache: Dict[str, Tuple[float, float]] = {}
 _quote_lock = asyncio.Lock()
 
 def _fetch_latest_price_sync(ticker: str) -> float:
+    t = yf.Ticker(ticker)
+    info = getattr(t, "fast_info", None)
+    if info is not None:
+        for k in ("lastPrice", "last_price", "last_price"):
+            if k in info:
+                val = float(info[k])
+                if not math.isnan(val):
+                    return val
+        val = getattr(info, "last_price", None)
+        if val is not None:
+            val = float(val)
+            if not math.isnan(val):
+                return val
+
     data = yf.download(
         ticker,
         period="1d",
@@ -364,6 +376,12 @@ def compute_signals(df: pd.DataFrame, sma_fast: int, sma_slow: int) -> pd.DataFr
 
     return df.dropna(subset=["SMA_Fast", "SMA_Slow"]).fillna({"ADX": 0, "VWAP": df["Close"]}).reset_index(drop=True)
 
+def compute_sma_only(df: pd.DataFrame, sma_fast: int, sma_slow: int) -> pd.DataFrame:
+    df = df.copy()
+    df["SMA_Fast"] = df["Close"].rolling(window=sma_fast, min_periods=sma_fast).mean()
+    df["SMA_Slow"] = df["Close"].rolling(window=sma_slow, min_periods=sma_slow).mean()
+    return df
+
 def _compute_rsi(close: pd.Series, length: int = 14) -> pd.Series:
     delta = close.diff()
     gain = delta.clip(lower=0)
@@ -411,69 +429,116 @@ def _compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, length: int 
     adx = dx.ewm(alpha=1/length, adjust=False).mean()
     return adx
 
-def compute_ai_prediction_and_signals(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+def compute_smc_signals(df: pd.DataFrame, sma_fast: int) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     df_feat = df.copy()
 
-    sma_10 = df_feat["Close"].rolling(window=10, min_periods=10).mean()
-    sma_30 = df_feat["Close"].rolling(window=30, min_periods=30).mean()
-    df_feat["SMA_DIST_10_30"] = (sma_10 - sma_30) / df_feat["Close"].replace(0, np.nan)
+    window = 11
+    swing_high = df_feat["High"].eq(df_feat["High"].rolling(window=window, center=True).max())
+    swing_low = df_feat["Low"].eq(df_feat["Low"].rolling(window=window, center=True).min())
+    swing_high = swing_high.fillna(False)
+    swing_low = swing_low.fillna(False)
 
-    df_feat["RSI_14"] = _compute_rsi(df_feat["Close"], length=14)
-    df_feat["ADX_14"] = _compute_adx(df_feat["High"], df_feat["Low"], df_feat["Close"], length=14)
-    df_feat["ATR_14"] = _compute_atr(df_feat["High"], df_feat["Low"], df_feat["Close"], length=14)
+    swing_high_price = df_feat["High"].where(swing_high)
+    swing_low_price = df_feat["Low"].where(swing_low)
+    prev_swing_high = swing_high_price.shift(1).ffill()
+    prev_swing_low = swing_low_price.shift(1).ffill()
 
-    feature_cols = ["SMA_DIST_10_30", "RSI_14", "ADX_14", "ATR_14"]
+    bos_bull = df_feat["Close"] > prev_swing_high
+    bos_bear = df_feat["Close"] < prev_swing_low
 
-    df_trainable = df_feat.copy()
-    df_trainable["next_close"] = df_trainable["Close"].shift(-1)
-    df_trainable["target"] = (df_trainable["next_close"] > df_trainable["Close"]).astype(int)
-    df_trainable = df_trainable.dropna(subset=feature_cols + ["next_close"])
+    bos_dir = pd.Series(np.nan, index=df_feat.index, dtype="float64")
+    bos_dir = bos_dir.mask(bos_bull, 1.0)
+    bos_dir = bos_dir.mask(bos_bear, -1.0)
+    last_dir = bos_dir.ffill().fillna(0.0)
+    choch = (bos_dir.notna()) & (bos_dir.fillna(0.0) != last_dir.shift(1).fillna(0.0))
 
-    ai_prediction = {"direction": "NEUTRAL", "confidence_score": 0.0}
-    df_feat["AI_Signal"] = 0
+    range_n = 120
+    hh = df_feat["High"].rolling(window=range_n, min_periods=range_n).max()
+    ll = df_feat["Low"].rolling(window=range_n, min_periods=range_n).min()
+    mid = (hh + ll) / 2.0
+    in_discount = df_feat["Close"] <= mid
+    in_premium = df_feat["Close"] >= mid
 
-    if len(df_trainable) < 80:
-        return df_feat, ai_prediction
+    atr = _compute_atr(df_feat["High"], df_feat["Low"], df_feat["Close"], length=14)
+    atr_ma50 = atr.rolling(window=50, min_periods=50).mean()
+    atr_std50 = atr.rolling(window=50, min_periods=50).std()
+    vol_ok = atr <= (atr_ma50 + (2.0 * atr_std50))
 
-    X = df_trainable[feature_cols]
-    y = df_trainable["target"]
+    prev_bear = df_feat["Close"].shift(1) < df_feat["Open"].shift(1)
+    prev_bull = df_feat["Close"].shift(1) > df_feat["Open"].shift(1)
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+    bull_ob_evt = bos_bull & prev_bear
+    bear_ob_evt = bos_bear & prev_bull
 
-    model = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1)
-    model.fit(X_train, y_train)
+    last_bull_ob_low = df_feat["Low"].shift(1).where(bull_ob_evt).ffill()
+    last_bull_ob_high = df_feat["High"].shift(1).where(bull_ob_evt).ffill()
+    last_bear_ob_low = df_feat["Low"].shift(1).where(bear_ob_evt).ffill()
+    last_bear_ob_high = df_feat["High"].shift(1).where(bear_ob_evt).ffill()
 
-    proba = model.predict_proba(X_test)
-    classes = list(getattr(model, "classes_", []))
-    if 1 in classes:
-        idx_up = classes.index(1)
+    touch_bull_ob = (df_feat["Close"] >= last_bull_ob_low) & (df_feat["Close"] <= last_bull_ob_high)
+    touch_bear_ob = (df_feat["Close"] >= last_bear_ob_low) & (df_feat["Close"] <= last_bear_ob_high)
+
+    structure_bull = last_dir >= 1
+    structure_bear = last_dir <= -1
+
+    sma_fast_series = df_feat["Close"].rolling(window=sma_fast, min_periods=sma_fast).mean()
+    df_feat["SMA_Fast"] = sma_fast_series
+
+    buy_cond = in_discount & touch_bull_ob & structure_bull & (df_feat["Close"] > sma_fast_series) & vol_ok
+    sell_cond = in_premium & touch_bear_ob & structure_bear & (df_feat["Close"] < sma_fast_series) & vol_ok
+
+    df_feat["SMC_Signal"] = 0
+    df_feat.loc[buy_cond, "SMC_Signal"] = 1
+    df_feat.loc[sell_cond, "SMC_Signal"] = -1
+
+    df_feat["SMC_Signal"] = df_feat["SMC_Signal"].astype(int)
+    df_feat["Execution_Reason"] = None
+    df_feat.loc[buy_cond, "Execution_Reason"] = "BOS/CHoCH + Reentry to Bullish OB in Discount Zone + SMA Fast"
+    df_feat.loc[sell_cond, "Execution_Reason"] = "BOS/CHoCH + Reentry to Bearish OB in Premium Zone + SMA Fast"
+
+    df_feat["SMC_SwingHigh"] = swing_high.astype(int)
+    df_feat["SMC_SwingLow"] = swing_low.astype(int)
+    df_feat["SMC_BOS_Bull"] = bos_bull.astype(int)
+    df_feat["SMC_BOS_Bear"] = bos_bear.astype(int)
+    df_feat["SMC_CHoCH"] = choch.astype(int)
+    df_feat["SMC_Discount"] = in_discount.astype(int)
+    df_feat["SMC_Premium"] = in_premium.astype(int)
+    df_feat["SMC_ATR_14"] = atr
+    df_feat["SMC_ATR_OK"] = vol_ok.astype(int)
+
+    latest = df_feat.tail(1)
+    if len(latest) == 0:
+        return df_feat, {"direction": "NEUTRAL", "confidence_score": 0.0}
+
+    last_sig = int(latest["SMC_Signal"].iloc[0])
+    if last_sig == 1:
+        direction = "BULLISH"
+    elif last_sig == -1:
+        direction = "BEARISH"
     else:
-        idx_up = 0
+        direction = "NEUTRAL"
 
-    proba_up = proba[:, idx_up]
-    df_feat.loc[X_test.index, "AI_Prob_Up"] = proba_up
+    bull_score = (
+        in_discount.astype(int)
+        + touch_bull_ob.astype(int)
+        + structure_bull.astype(int)
+        + (df_feat["Close"] > sma_fast_series).astype(int)
+    ) / 4.0
+    bear_score = (
+        in_premium.astype(int)
+        + touch_bear_ob.astype(int)
+        + structure_bear.astype(int)
+        + (df_feat["Close"] < sma_fast_series).astype(int)
+    ) / 4.0
 
-    latest_feat = df_feat[feature_cols].dropna().tail(1)
-    if len(latest_feat) > 0:
-        latest_proba = model.predict_proba(latest_feat)[0]
-        p_up = float(latest_proba[idx_up])
-        p_down = float(1.0 - p_up)
-        confidence = float(max(p_up, p_down))
-        if p_up > 0.75:
-            ai_prediction = {"direction": "BULLISH", "confidence_score": float(p_up)}
-        elif p_down > 0.75:
-            ai_prediction = {"direction": "BEARISH", "confidence_score": float(p_down)}
-        else:
-            ai_prediction = {"direction": "NEUTRAL", "confidence_score": confidence}
+    if direction == "BULLISH":
+        conf = float(bull_score.tail(1).iloc[0])
+    elif direction == "BEARISH":
+        conf = float(bear_score.tail(1).iloc[0])
+    else:
+        conf = float(max(bull_score.tail(1).iloc[0], bear_score.tail(1).iloc[0]))
 
-    df_feat["AI_Signal"] = np.where(
-        df_feat.get("AI_Prob_Up", np.nan) > 0.75,
-        1,
-        np.where(df_feat.get("AI_Prob_Up", np.nan) < 0.25, -1, 0),
-    )
-    df_feat["AI_Signal"] = df_feat["AI_Signal"].fillna(0).astype(int)
-
-    return df_feat, ai_prediction
+    return df_feat, {"direction": direction, "confidence_score": conf}
 
 
 def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks",
@@ -517,8 +582,10 @@ def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks
     for i in range(len(df)):
         row = df.iloc[i]
         price = float(row["Close"])
-        crossover = int(row.get("AI_Signal", row.get("Crossover", 0)))
+        crossover = int(row.get("SMC_Signal", row.get("AI_Signal", row.get("Crossover", 0))))
         date_str = str(row["Date"])
+        exec_reason = row.get("Execution_Reason", None)
+        exec_reason = str(exec_reason) if exec_reason else ""
 
         # ── Calculate floating PNL ──
         floating_pnl = 0.0
@@ -585,6 +652,7 @@ def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks
                     "date": date_str, "type": f"SELL ({reason})",
                     "price": round(sell_price, price_dec), "shares": position,
                     "fee": commission, "pnl": round(realized_pnl - commission, 2),
+                    "reason": f"{reason} EXIT",
                 })
                 position = 0
             elif position < 0:
@@ -598,6 +666,7 @@ def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks
                     "date": date_str, "type": f"COVER ({reason})",
                     "price": round(cover_price, price_dec), "shares": abs(position),
                     "fee": commission, "pnl": round(realized_pnl - commission, 2),
+                    "reason": f"{reason} EXIT",
                 })
                 position = 0
             continue  # Skip crossover logic this bar
@@ -630,6 +699,7 @@ def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks
                     "shares": abs(position),
                     "fee": commission,
                     "pnl": round(realized_pnl - commission, 2),
+                    "reason": "REVERSE",
                 })
                 position = 0
 
@@ -658,6 +728,7 @@ def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks
                         "shares": shares,
                         "fee": commission,
                         "pnl": 0,
+                        "reason": exec_reason,
                     })
 
         elif crossover == -1:
@@ -679,6 +750,7 @@ def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks
                     "shares": position,
                     "fee": commission,
                     "pnl": round(realized_pnl - commission, 2),
+                    "reason": "REVERSE",
                 })
                 position = 0
 
@@ -706,6 +778,7 @@ def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks
                         "shares": shares,
                         "fee": commission,
                         "pnl": 0,
+                        "reason": exec_reason,
                     })
 
     # ── FINAL: Close any open position at last price ──
@@ -732,6 +805,7 @@ def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks
                 "shares": position,
                 "fee": commission,
                 "pnl": round(realized_pnl - commission, 2),
+                "reason": "END OF DATA",
             })
             position = 0
             locked_margin = 0.0
@@ -748,6 +822,7 @@ def simulate_broker(df: pd.DataFrame, capital: float, asset_class: str = "stocks
                 "shares": abs(position),
                 "fee": commission,
                 "pnl": round(realized_pnl - commission, 2),
+                "reason": "END OF DATA",
             })
             position = 0
             locked_margin = 0.0
@@ -896,8 +971,8 @@ async def get_backtest_payload_cached(
     formatted_ticker = format_ticker(ticker, asset_class)
     history_payload = await fetch_market_data_cached(formatted_ticker, interval)
     df = _cache_payload_to_df(history_payload)
-    df = await run_in_threadpool(compute_signals, df, sma_fast, sma_slow)
-    df, ai_prediction = await run_in_threadpool(compute_ai_prediction_and_signals, df)
+    df = await run_in_threadpool(compute_sma_only, df, sma_fast, sma_slow)
+    df, ai_prediction = await run_in_threadpool(compute_smc_signals, df, sma_fast)
     result = await run_in_threadpool(simulate_broker, df, capital, asset_class, formatted_ticker, stop_loss_pct, take_profit_pct)
 
     price_dec = get_price_decimals(asset_class, formatted_ticker)
@@ -983,7 +1058,7 @@ async def execute_paper_trade(
     sma_fast: int = Query(10, description="Fast SMA period"),
     sma_slow: int = Query(30, description="Slow SMA period"),
     capital: float = Query(10000, description="Starting demo capital (USD)"),
-    asset_class: str = Query("stocks", description="Asset class: stocks or forex"),
+    asset_class: str = Query("stocks", description="Asset class: stocks, forex, or indices"),
     stop_loss_pct: float = Query(0, description="Stop-loss percentage (0 = disabled)"),
     take_profit_pct: float = Query(0, description="Take-profit percentage (0 = disabled)"),
     user: dict = Depends(get_current_user)
@@ -1003,19 +1078,14 @@ async def execute_paper_trade(
 async def ws_live(websocket: WebSocket):
     await live_manager.connect(websocket)
     ticker = websocket.query_params.get("ticker", "AAPL")
-    interval = websocket.query_params.get("interval", "1m")
     asset_class = websocket.query_params.get("asset_class", "stocks")
     formatted_ticker = format_ticker(ticker, asset_class)
     try:
         while True:
             price = await get_latest_price(formatted_ticker)
             await websocket.send_json({
-                "type": "live_tick",
-                "ticker": ticker,
-                "asset_class": asset_class,
-                "interval": interval,
-                "server_time": datetime.utcnow().isoformat() + "Z",
-                "heartbeat": True,
+                "type": "LIVE_TICK",
+                "timestamp": int(time.time()),
                 "price": price,
             })
             await asyncio.sleep(3)
