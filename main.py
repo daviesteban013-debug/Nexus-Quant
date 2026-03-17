@@ -124,6 +124,16 @@ INTERVAL_CONFIG = {
     "1d":  {"period": "max",  "interval": "1d"},
 }
 
+INDEX_TICKERS = {
+    "s&p 500": "^GSPC",
+    "nasdaq 100": "^NDX",
+    "dow jones": "^DJI",
+    "russell 2000": "^RUT",
+}
+
+def _normalize_symbol_name(name: str) -> str:
+    return " ".join(str(name).strip().lower().split())
+
 def _market_key_builder(
     func: Any,
     namespace: str,
@@ -216,12 +226,21 @@ def get_price_decimals(asset_class: str, ticker: str) -> int:
     """Return decimal precision for display."""
     if asset_class == "forex":
         return 2 if is_jpy_pair(ticker) else 5
+    if asset_class == "indices":
+        return 2
     return 4
 
 
 def format_ticker(ticker: str, asset_class: str) -> str:
     """Format ticker for yfinance. Forex pairs need '=X' suffix."""
-    ticker = ticker.upper().replace(" ", "").replace("/", "")
+    if asset_class == "indices":
+        key = _normalize_symbol_name(ticker)
+        mapped = INDEX_TICKERS.get(key)
+        if mapped:
+            return mapped
+        return str(ticker).strip()
+
+    ticker = str(ticker).upper().replace(" ", "").replace("/", "")
     # Detect Forex by asset class OR 6-letter string without symbols
     is_fx = (asset_class == "forex") or (len(ticker) == 6 and ticker.isalpha())
     if is_fx and not ticker.endswith("=X"):
@@ -421,7 +440,7 @@ def compute_ai_prediction_and_signals(df: pd.DataFrame) -> Tuple[pd.DataFrame, D
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1)
     model.fit(X_train, y_train)
 
     proba = model.predict_proba(X_test)
@@ -820,9 +839,60 @@ async def _run_backtest(
         raise ValueError("sma_fast must be less than sma_slow")
     if capital <= 0:
         raise ValueError("capital must be positive")
-    if asset_class not in ("stocks", "forex"):
-        raise ValueError("asset_class must be 'stocks' or 'forex'")
+    if asset_class not in ("stocks", "forex", "indices"):
+        raise ValueError("asset_class must be 'stocks', 'forex', or 'indices'")
 
+    payload = await get_backtest_payload_cached(
+        ticker=ticker,
+        interval=interval,
+        sma_fast=sma_fast,
+        sma_slow=sma_slow,
+        capital=capital,
+        asset_class=asset_class,
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+    )
+    return JSONResponse(content=payload)
+
+
+def _backtest_key_builder(
+    func: Any,
+    namespace: str,
+    request: Optional[Any],
+    response: Optional[Any],
+    *args: Any,
+    **kwargs: Any,
+) -> str:
+    def _g(k, i, default=""):
+        if k in kwargs:
+            return kwargs.get(k, default)
+        if len(args) > i:
+            return args[i]
+        return default
+
+    ticker = _g("ticker", 0)
+    interval = _g("interval", 1)
+    sma_fast = _g("sma_fast", 2)
+    sma_slow = _g("sma_slow", 3)
+    capital = _g("capital", 4)
+    asset_class = _g("asset_class", 5)
+    stop_loss_pct = _g("stop_loss_pct", 6)
+    take_profit_pct = _g("take_profit_pct", 7)
+
+    return f"{namespace}:{ticker}:{interval}:{asset_class}:{sma_fast}:{sma_slow}:{capital}:{stop_loss_pct}:{take_profit_pct}"
+
+
+@cache(expire=60, namespace="backtest:v3", key_builder=_backtest_key_builder)
+async def get_backtest_payload_cached(
+    ticker: str,
+    interval: str,
+    sma_fast: int,
+    sma_slow: int,
+    capital: float,
+    asset_class: str,
+    stop_loss_pct: float = 0,
+    take_profit_pct: float = 0,
+) -> dict:
     formatted_ticker = format_ticker(ticker, asset_class)
     history_payload = await fetch_market_data_cached(formatted_ticker, interval)
     df = _cache_payload_to_df(history_payload)
@@ -832,63 +902,77 @@ async def _run_backtest(
 
     price_dec = get_price_decimals(asset_class, formatted_ticker)
     candle_slice = df.tail(300).copy()
-    candles = []
-    volume_profile = []
-    vol_series = candle_slice["Volume"] if "Volume" in candle_slice.columns else pd.Series([0] * len(candle_slice))
-    vol_total_sum = float(pd.to_numeric(vol_series, errors="coerce").fillna(0).sum())
-    volume_experimental = (asset_class == "forex") or (vol_total_sum <= 0)
-    vol_ma20_series = pd.to_numeric(vol_series, errors="coerce").fillna(0).rolling(window=20, min_periods=1).mean()
-    for i, row in enumerate(candle_slice.itertuples(index=False)):
-        vol_raw = getattr(row, "Volume", 0)
-        vol_num = pd.to_numeric(vol_raw, errors="coerce")
-        vol_val = int(vol_num) if pd.notna(vol_num) else 0
-        is_buy_candle = float(row.Close) > float(row.Open)
-        buy_vol = vol_val if is_buy_candle else 0
-        sell_vol = vol_val if not is_buy_candle else 0
-        volume_delta = int(buy_vol - sell_vol)
-        ts = str(row.Date)
-        ma20 = float(pd.to_numeric(vol_ma20_series.iloc[i], errors="coerce")) if i < len(vol_ma20_series) else 0.0
-        denom = ma20 if ma20 > 0 else float(max(vol_val, 1))
-        volume_intensity = float(max(0.0, min(1.0, float(vol_val) / float(denom))))
-        candles.append({
-            "x": ts,
-            "o": round(float(row.Open), price_dec),
-            "h": round(float(row.High), price_dec),
-            "l": round(float(row.Low), price_dec),
-            "c": round(float(row.Close), price_dec),
-            "v": vol_val,
-            "buy_volume": buy_vol,
-            "sell_volume": sell_vol,
-            "total_volume": vol_val,
-            "volume_delta": volume_delta,
-            "volume_intensity": volume_intensity,
-            "sma_fast": round(float(row.SMA_Fast), price_dec) if pd.notna(getattr(row, "SMA_Fast", None)) else None,
-            "sma_slow": round(float(row.SMA_Slow), price_dec) if pd.notna(getattr(row, "SMA_Slow", None)) else None,
-            "vwap": round(float(row.VWAP), price_dec) if pd.notna(getattr(row, "VWAP", None)) else None,
-            "adx": round(float(row.ADX), 2) if pd.notna(getattr(row, "ADX", None)) else None,
-        })
-        volume_profile.append({
-            "timestamp": ts,
-            "buy_volume": buy_vol,
-            "sell_volume": sell_vol,
-            "total_volume": vol_val,
-        })
 
-    display_ticker = ticker.upper().replace("=X", "")
-    return JSONResponse(content={
+    if "Volume" in candle_slice.columns:
+        vol_val = pd.to_numeric(candle_slice["Volume"], errors="coerce").fillna(0).astype(int)
+    else:
+        vol_val = pd.Series([0] * len(candle_slice), index=candle_slice.index, dtype="int64")
+
+    vol_total_sum = float(vol_val.sum())
+    volume_experimental = (asset_class == "forex") or (vol_total_sum <= 0)
+
+    is_buy = candle_slice["Close"] > candle_slice["Open"]
+    buy_vol = vol_val.where(is_buy, 0)
+    sell_vol = vol_val.where(~is_buy, 0)
+    vol_ma20 = vol_val.rolling(window=20, min_periods=1).mean()
+    denom = vol_ma20.where(vol_ma20 > 0, vol_val.clip(lower=1))
+    volume_intensity = (vol_val / denom).clip(lower=0.0, upper=1.0).astype(float)
+    volume_delta = (buy_vol - sell_vol).astype(int)
+
+    ts = pd.to_datetime(candle_slice["Date"]).dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    sma_fast_s = candle_slice.get("SMA_Fast")
+    sma_slow_s = candle_slice.get("SMA_Slow")
+    vwap_s = candle_slice.get("VWAP")
+    adx_s = candle_slice.get("ADX")
+
+    candles_df = pd.DataFrame({
+        "x": ts,
+        "o": candle_slice["Open"].round(price_dec),
+        "h": candle_slice["High"].round(price_dec),
+        "l": candle_slice["Low"].round(price_dec),
+        "c": candle_slice["Close"].round(price_dec),
+        "v": vol_val,
+        "buy_volume": buy_vol,
+        "sell_volume": sell_vol,
+        "total_volume": vol_val,
+        "volume_delta": volume_delta,
+        "volume_intensity": volume_intensity,
+        "sma_fast": sma_fast_s.round(price_dec) if sma_fast_s is not None else None,
+        "sma_slow": sma_slow_s.round(price_dec) if sma_slow_s is not None else None,
+        "vwap": vwap_s.round(price_dec) if vwap_s is not None else None,
+        "adx": adx_s.round(2) if adx_s is not None else None,
+    })
+
+    for col in ("sma_fast", "sma_slow", "vwap", "adx"):
+        if col in candles_df.columns:
+            candles_df[col] = candles_df[col].where(pd.notna(candles_df[col]), None)
+
+    candles = candles_df.to_dict(orient="records")
+
+    volume_profile_df = pd.DataFrame({
+        "timestamp": ts,
+        "buy_volume": buy_vol,
+        "sell_volume": sell_vol,
+        "total_volume": vol_val,
+    })
+    volume_profile = volume_profile_df.to_dict(orient="records")
+
+    display_ticker = str(ticker).upper().replace("=X", "")
+    return {
         "status": "success",
         "ticker": display_ticker,
         "interval": interval,
         "asset_class": asset_class,
         "price_decimals": price_dec,
-        "total_candles": len(df),
-        "rendered_candles": len(candles),
+        "total_candles": int(len(df)),
+        "rendered_candles": int(len(candles)),
         "candles": candles,
         "volume_profile": volume_profile,
-        "volume_experimental": volume_experimental,
+        "volume_experimental": bool(volume_experimental),
         "ai_prediction": ai_prediction,
         **result,
-    })
+    }
 
 
 @app.get("/api/broker/execute")

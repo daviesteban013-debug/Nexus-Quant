@@ -56,7 +56,7 @@ function App() {
     setAssetClass(v);
     setResult(null);
     setError(null);
-    setTicker(v === 'forex' ? 'EURUSD' : 'AAPL');
+    setTicker(v === 'forex' ? 'EURUSD' : (v === 'indices' ? 'S&P 500' : 'AAPL'));
   };
 
   // ── Execute ──
